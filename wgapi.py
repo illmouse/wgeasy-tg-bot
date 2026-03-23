@@ -16,6 +16,10 @@ class WGEasyAPI:
             json={"username": self.username, "password": self.password, "remember": False},
         )
         resp.raise_for_status()
+        # Strip the Secure flag so cookies are sent over plain HTTP too
+        # (needed when connecting directly to wg-easy inside Docker without TLS)
+        for cookie in self.session.cookies:
+            cookie.secure = False
         self._authenticated = True
 
     def _request(self, method, path, **kwargs):
