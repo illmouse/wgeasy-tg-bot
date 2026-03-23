@@ -68,12 +68,12 @@ INLINE_MENU = InlineKeyboardMarkup([
 
 AMNEZIA_LINKS = (
     "\n\n📱 <b>Install a WireGuard client — two options:</b>\n\n"
-    "<b>AmneziaWG</b> (with obfuscation support)\n"
+    "<b>AmneziaWG</b>\n"
     '  <a href="https://apps.apple.com/us/app/amneziawg/id6478942365">iOS &amp; macOS</a> · '
     '<a href="https://play.google.com/store/apps/details?id=org.amnezia.awg">Android</a> · '
     '<a href="https://github.com/amnezia-vpn/amneziawg-windows-client/releases">Windows</a> · '
     '<a href="https://github.com/amnezia-vpn/amneziawg-linux-kernel-module">Linux</a>\n\n'
-    "<b>WG Tunnel</b> (standard WireGuard)\n"
+    "<b>WG Tunnel</b> (split tunneling)\n"
     '  <a href="https://play.google.com/store/apps/details?id=com.zaneschepke.wireguardautotunnel">Android</a> · '
     '<a href="https://wgtunnel.com/download?platform=windows">Windows</a> · '
     '<a href="https://wgtunnel.com/download?platform=linux">Linux</a>'
