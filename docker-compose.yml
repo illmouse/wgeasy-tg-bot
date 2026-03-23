@@ -1,0 +1,6 @@
+services:
+  bot:
+    image: ghcr.io/illmouse/wgeasy-tg-bot:main
+    # build: .   # uncomment to build locally instead of pulling the image
+    env_file: .env
+    restart: unless-stopped
