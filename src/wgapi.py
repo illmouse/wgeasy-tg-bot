@@ -43,6 +43,16 @@ class WGEasyAPI:
     def delete_client(self, client_id):
         return self._request("DELETE", f"/api/client/{client_id}").json()
 
+    def get_client(self, client_id) -> dict:
+        return self._request("GET", f"/api/client/{client_id}").json()
+
+    def rename_client(self, client_id, new_name: str):
+        c = self.get_client(client_id)
+        skip = {"id", "userId", "interfaceId", "publicKey", "createdAt", "updatedAt", "endpoint"}
+        payload = {k: v for k, v in c.items() if k not in skip}
+        payload["name"] = new_name
+        return self._request("POST", f"/api/client/{client_id}", json=payload).json()
+
     def get_client_config(self, client_id) -> tuple[bytes, str]:
         """Returns (config_bytes, filename)."""
         resp = self._request("GET", f"/api/client/{client_id}/configuration")

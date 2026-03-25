@@ -2,6 +2,7 @@ import html
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from io import BytesIO
 
 from telegram import (
@@ -39,6 +40,7 @@ ALLOWED_USERNAMES = {
 
 WAITING_FOR_NAME = 1
 WAITING_FOR_SEARCH = 2
+WAITING_FOR_RENAME = 3
 
 PAGE_SIZE = 8
 
@@ -50,6 +52,15 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True,
 )
+
+CANCEL_CONV_KB = InlineKeyboardMarkup([[
+    InlineKeyboardButton("❌ Cancel", callback_data="cancel_conv"),
+]])
+
+PEER_SELECT_TITLE = {
+    "cfg": "Select peer to download config:",
+    "del": "Select peer to delete:",
+}
 
 INLINE_MENU = InlineKeyboardMarkup([
     [
@@ -85,6 +96,16 @@ AMNEZIA_LINKS = (
 def is_allowed(update: Update) -> bool:
     user = update.effective_user
     return user is not None and user.username in ALLOWED_USERNAMES
+
+
+def require_access(func):
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not is_allowed(update):
+            await update.effective_message.reply_text("Access denied.")
+            return ConversationHandler.END
+        return await func(update, context)
+    return wrapper
 
 
 def filter_clients(clients: list, query: str) -> list:
@@ -135,48 +156,7 @@ def format_peers_text(clients: list) -> str:
     return "\n".join(lines)
 
 
-# ── Commands ──────────────────────────────────────────────────────────────────
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        await update.message.reply_text("Access denied.")
-        return
-    await update.message.reply_text("WireGuard Manager", reply_markup=MAIN_KEYBOARD)
-
-
-async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        await update.message.reply_text("Access denied.")
-        return
-    await update.message.reply_text("WireGuard Manager", reply_markup=INLINE_MENU)
-
-
-async def list_peers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        await update.message.reply_text("Access denied.")
-        return
-    try:
-        clients = wg.list_clients()
-    except Exception as e:
-        await update.message.reply_text(f"API error: {e}")
-        return
-
-    if not clients:
-        await update.message.reply_text("No peers found.")
-        return
-    await update.message.reply_text(format_peers_text(clients), parse_mode="HTML")
-
-
-async def active_peers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        await update.message.reply_text("Access denied.")
-        return
-    try:
-        clients = wg.list_clients()
-    except Exception as e:
-        await update.message.reply_text(f"API error: {e}")
-        return
-
+def format_active_peers_text(clients: list) -> str:
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=3)
     lines = []
     for c in clients:
@@ -190,17 +170,39 @@ async def active_peers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = html.escape(c.get("name", "?"))
         addr = c.get("ipv4Address") or "N/A"
         lines.append(f"🟢 <b>{name}</b>  —  {addr}  <i>({ago}s ago)</i>")
+    return "\n".join(lines) if lines else ""
 
-    if not lines:
-        await update.message.reply_text("No peers active in the last 3 minutes.")
+
+async def _show_peer_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str):
+    try:
+        clients = wg.list_clients()
+    except Exception as e:
+        await update.message.reply_text(f"API error: {e}")
         return
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-
-
-async def config_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        await update.message.reply_text("Access denied.")
+    if not clients:
+        await update.message.reply_text("No peers found.")
         return
+    context.user_data[f"{action}_filter"] = ""
+    await update.message.reply_text(
+        PEER_SELECT_TITLE[action],
+        reply_markup=peers_keyboard(clients, action),
+    )
+
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+
+@require_access
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("WireGuard Manager", reply_markup=MAIN_KEYBOARD)
+
+
+@require_access
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("WireGuard Manager", reply_markup=INLINE_MENU)
+
+
+@require_access
+async def list_peers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         clients = wg.list_clients()
     except Exception as e:
@@ -210,49 +212,41 @@ async def config_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not clients:
         await update.message.reply_text("No peers found.")
         return
-
-    context.user_data["cfg_filter"] = ""
-    await update.message.reply_text(
-        "Select peer to download config:",
-        reply_markup=peers_keyboard(clients, "cfg"),
-    )
+    await update.message.reply_text(format_peers_text(clients), parse_mode="HTML")
 
 
-async def delete_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        await update.message.reply_text("Access denied.")
-        return
+@require_access
+async def active_peers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         clients = wg.list_clients()
     except Exception as e:
         await update.message.reply_text(f"API error: {e}")
         return
 
-    if not clients:
-        await update.message.reply_text("No peers to delete.")
-        return
+    text = format_active_peers_text(clients)
+    await update.message.reply_text(text or "No peers active in the last 3 minutes.", parse_mode="HTML")
 
-    context.user_data["del_filter"] = ""
-    await update.message.reply_text(
-        "Select peer to delete:",
-        reply_markup=peers_keyboard(clients, "del"),
-    )
+
+@require_access
+async def config_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _show_peer_selection(update, context, "cfg")
+
+
+@require_access
+async def delete_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _show_peer_selection(update, context, "del")
 
 
 # ── Create peer conversation ──────────────────────────────────────────────────
 
+@require_access
 async def create_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        await update.message.reply_text("Access denied.")
-        return ConversationHandler.END
-    await update.message.reply_text("Enter peer name:")
+    await update.message.reply_text("Enter peer name:", reply_markup=CANCEL_CONV_KB)
     return WAITING_FOR_NAME
 
 
+@require_access
 async def create_receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        return ConversationHandler.END
-
     name = update.message.text.strip()
     if not name:
         await update.message.reply_text("Name cannot be empty. Enter peer name:")
@@ -283,10 +277,8 @@ async def create_receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ── Search conversation ───────────────────────────────────────────────────────
 
+@require_access
 async def search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        await update.message.reply_text("Access denied.")
-        return ConversationHandler.END
     if context.args:
         await _do_search(update, " ".join(context.args))
         return ConversationHandler.END
@@ -294,9 +286,8 @@ async def search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_FOR_SEARCH
 
 
+@require_access
 async def search_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        return ConversationHandler.END
     await _do_search(update, update.message.text.strip())
     return ConversationHandler.END
 
@@ -321,6 +312,7 @@ async def _do_search(update: Update, term: str):
         name = c.get("name", str(c["id"]))
         keyboard.append([
             InlineKeyboardButton(f"📄 {name}", callback_data=f"cfg:{c['id']}"),
+            InlineKeyboardButton("✏️", callback_data=f"ren:{c['id']}:{name[:40]}"),
             InlineKeyboardButton("🗑", callback_data=f"del:{c['id']}:{name[:40]}"),
         ])
     keyboard.append([InlineKeyboardButton("Close", callback_data="cancel")])
@@ -337,13 +329,62 @@ async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def cancel_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Cancelled.")
+    return ConversationHandler.END
+
+
+# ── Rename peer conversation ──────────────────────────────────────────────────
+
+async def rename_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_allowed(update):
+        await query.edit_message_text("Access denied.")
+        return ConversationHandler.END
+
+    parts = query.data.split(":", 2)
+    context.user_data["rename_id"] = parts[1]
+    context.user_data["rename_old"] = parts[2] if len(parts) > 2 else parts[1]
+
+    await query.message.reply_text(
+        f"Enter new name for <b>{html.escape(context.user_data['rename_old'])}</b>:",
+        parse_mode="HTML",
+        reply_markup=CANCEL_CONV_KB,
+    )
+    return WAITING_FOR_RENAME
+
+
+@require_access
+async def rename_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    new_name = update.message.text.strip()
+    if not new_name:
+        await update.message.reply_text("Name cannot be empty. Enter new name:")
+        return WAITING_FOR_RENAME
+
+    client_id = context.user_data.get("rename_id")
+    old_name = context.user_data.get("rename_old", client_id)
+    try:
+        wg.rename_client(client_id, new_name)
+        await update.message.reply_text(
+            f"✅ <b>{html.escape(old_name)}</b> → <b>{html.escape(new_name)}</b>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"API error: {e}")
+
+    return ConversationHandler.END
+
+
 # ── Callback handler ──────────────────────────────────────────────────────────
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.from_user.username not in ALLOWED_USERNAMES:
+    if not is_allowed(update):
         await query.edit_message_text("Access denied.")
         return
 
@@ -375,21 +416,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 await query.message.reply_text(f"API error: {e}")
                 return
-            cutoff = datetime.now(timezone.utc) - timedelta(minutes=3)
-            lines = []
-            for c in clients:
-                hs = c.get("latestHandshakeAt")
-                if not hs:
-                    continue
-                hs_dt = datetime.fromisoformat(hs.replace("Z", "+00:00"))
-                if hs_dt < cutoff:
-                    continue
-                ago = int((datetime.now(timezone.utc) - hs_dt).total_seconds())
-                name = html.escape(c.get("name", "?"))
-                addr = c.get("ipv4Address") or "N/A"
-                lines.append(f"🟢 <b>{name}</b>  —  {addr}  <i>({ago}s ago)</i>")
-            text = "\n".join(lines) if lines else "No peers active in the last 3 minutes."
-            await query.message.reply_text(text, parse_mode="HTML")
+            text = format_active_peers_text(clients)
+            await query.message.reply_text(text or "No peers active in the last 3 minutes.", parse_mode="HTML")
 
         elif action == "create":
             await query.message.reply_text("Use /create &lt;name&gt; to create a new peer.", parse_mode="HTML")
@@ -408,8 +436,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             act = "cfg" if action == "config" else "del"
             context.user_data[f"{act}_filter"] = ""
-            title = "Select peer to download config:" if act == "cfg" else "Select peer to delete:"
-            await query.edit_message_text(title, reply_markup=peers_keyboard(clients, act))
+            await query.edit_message_text(PEER_SELECT_TITLE[act], reply_markup=peers_keyboard(clients, act))
         return
 
     # ── Pagination ──
@@ -426,7 +453,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not filtered:
             await query.edit_message_text("No peers found.")
             return
-        title = "Select peer to download config:" if act == "cfg" else "Select peer to delete:"
+        title = PEER_SELECT_TITLE[act]
         if q:
             title += f"\n🔍 <i>{html.escape(q)}</i>"
         await query.edit_message_text(
@@ -483,7 +510,9 @@ def main():
     token = os.environ["BOT_TOKEN"]
     app = Application.builder().token(token).build()
 
-    kb_buttons = ["📋 Peers", "🟢 Active", "📥 Get Config", "🗑 Delete Peer", "🔍 Search"]
+    kb_buttons = ["📋 Peers", "🟢 Active", "➕ Create Peer", "📥 Get Config", "🔍 Search", "🗑 Delete Peer"]
+    kb_filter = filters.Text(kb_buttons)
+    cancel_cb = CallbackQueryHandler(cancel_from_button, pattern="^cancel_conv$")
 
     conv_handler = ConversationHandler(
         entry_points=[
@@ -491,18 +520,28 @@ def main():
             CommandHandler("create", create_start),
             MessageHandler(filters.Text(["🔍 Search"]), search_start),
             CommandHandler("search", search_start),
+            CallbackQueryHandler(rename_start, pattern="^ren:"),
         ],
         states={
             WAITING_FOR_NAME: [
+                MessageHandler(kb_filter, cancel_conv),
+                cancel_cb,
                 MessageHandler(filters.TEXT & ~filters.COMMAND, create_receive_name),
             ],
             WAITING_FOR_SEARCH: [
+                MessageHandler(kb_filter, cancel_conv),
+                cancel_cb,
                 MessageHandler(filters.TEXT & ~filters.COMMAND, search_receive),
+            ],
+            WAITING_FOR_RENAME: [
+                MessageHandler(kb_filter, cancel_conv),
+                cancel_cb,
+                MessageHandler(filters.TEXT & ~filters.COMMAND, rename_receive),
             ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel_conv),
-            MessageHandler(filters.Text(kb_buttons), cancel_conv),
+            MessageHandler(kb_filter, cancel_conv),
         ],
     )
 
