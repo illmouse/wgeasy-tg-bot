@@ -17,7 +17,7 @@ Telegram bot for managing [wg-easy](https://github.com/wg-easy/wg-easy) WireGuar
 - Admins add users via `/adduser` (forward a message from the user or send their username, optionally with a limit), and manage them with `/users`, `/limit`, `/deluser`, `/ban`, and `/unban`
 - Access requests: unregistered users can ask for access with `/givemepowers`; admins approve or decline right from the chat
 - Limit change requests: users ask for a new peer limit with the "📈 Request Limit" button; admins approve or decline in chat
-- Interactive user management: `/users` lists users as buttons (peers/limit); the user card shows each peer in one row with its creation date and last handshake, plus peer details, enable/disable, rename and delete actions, and delete/limit/ban and request-history actions on the user
+- Interactive user management: `/users` lists users as buttons (peers/limit); the user card leads to a dedicated peers card (one full-width row per peer with creation date and last handshake), and the peer details card holds all peer actions (config, rename, enable/disable, delete) alongside user actions (delete, limit, ban/unban, request history)
 - Request history: admins review all past access/limit requests with `/requests` or the "📜 Requests" button; users see their own requests in `/givemepowers`
 
 ## Setup
@@ -91,7 +91,7 @@ The bot stores users in a SQLite database. Mount a volume to persist `users.db` 
 | `/search <name>` | Search peers by name |
 | `/cancel` | Cancel current operation |
 | `/adduser` | Add a user — forward a message from them or send their username (admin only) |
-| `/users` | Interactive user list: tap a user to see their peers (name, creation date, last handshake — tap the name for details and config) with rename/toggle/delete actions, and delete/limit/ban/requests actions on the user (admin only) |
+| `/users` | Interactive user list: tap a user to open their card (delete/limit/ban/requests actions), then `Peers` opens the peers card — one full-width row per peer — and a peer's name opens its details card with config/rename/toggle/delete actions (admin only) |
 | `/limit <username> <N>` | Set a user's peer limit; `-1` means unlimited (admin only) |
 | `/deluser <username>` | Remove a user together with all their peers (admin only) |
 | `/ban <username>` | Temporarily block a user and disable their peers (admin only) |

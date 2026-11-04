@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- User management navigation rework: the user card now leads to a dedicated peers card (one full-width row per peer, so the name, creation date and last handshake are no longer squeezed); all peer actions (get config, rename, enable/disable, delete) moved into the peer details card; peer actions no longer appear on the user card itself.
+- Navigation buttons: `Users` renamed to `Back` and placed on one row with `Close`; Delete pairs with Ban/Unban, Limit pairs with Requests; after deleting a peer from its details card, admins get a back button to the user's peers card.
+
 ## [0.2.3b] - 2026-11-04
 
 ### Added

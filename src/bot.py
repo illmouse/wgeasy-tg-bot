@@ -480,34 +480,93 @@ def _user_detail_view(username):
         head += " 🔒 BANNED"
     lines = [head, f"Limit: {len(active)}/{limit}"]
     lines.append(f"TG: {u.tg_id}" if u.tg_id not in (None, -1) else "TG: pending")
-    lines.append("")
+    if api_error:
+        lines.append("")
+        lines.append("⚠️ Peer list unavailable (API error).")
+    if u.status == "banned":
+        ban_btn = InlineKeyboardButton("🔓 Unban", callback_data=f"unban:{username}")
+    else:
+        ban_btn = InlineKeyboardButton("🔒 Ban", callback_data=f"uban:{username}")
+    peers_label = "👥 Peers" if api_error else f"👥 Peers ({len(active)})"
+    rows = [
+        [InlineKeyboardButton("🗑 Delete", callback_data=f"udel:{username}"), ban_btn],
+        [InlineKeyboardButton("📝 Limit", callback_data=f"ulimit:{username}"), InlineKeyboardButton("📜 Requests", callback_data=f"ureqs:{username}")],
+        [InlineKeyboardButton(peers_label, callback_data=f"upeers:{username}")],
+        _back_close_row("menu:users"),
+    ]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _back_close_row(target):
+    return [InlineKeyboardButton("◀ Back", callback_data=target), InlineKeyboardButton("❌ Close", callback_data="cancel")]
+
+
+def _peers_list_view(username):
+    u = users_db.get_user(username)
+    if u is None:
+        return None
+    try:
+        clients = wg.list_clients()
+        by_name = {str(c.get("name", "")).lower(): c for c in clients}
+        api_error = False
+    except Exception:
+        by_name = {}
+        api_error = True
+    records = users_db.peer_records(u.username)
+    active = [rec for rec in records if not api_error and rec["name"] in by_name]
+    limit = "∞" if u.config_limit == -1 else str(u.config_limit)
+    lines = [f"👥 Peers of <b>{html.escape(username)}</b>"]
     if api_error:
         lines.append("⚠️ Peer list unavailable (API error).")
     elif active:
-        lines.append("Peers — tap the name for details:")
+        lines[0] += f" ({len(active)}/{limit})"
+        lines.append("Tap a name for details:")
     else:
         lines.append("Peers: none")
-    rows = [[
-        InlineKeyboardButton("🗑 Delete user", callback_data=f"udel:{username}"),
-        InlineKeyboardButton("📝 Limit", callback_data=f"ulimit:{username}"),
-    ]]
-    if u.status == "banned":
-        rows.append([InlineKeyboardButton("🔓 Unban", callback_data=f"unban:{username}")])
-    else:
-        rows.append([InlineKeyboardButton("🔒 Ban", callback_data=f"uban:{username}")])
-    rows.append([InlineKeyboardButton("📜 Requests", callback_data=f"ureqs:{username}")])
+    rows = []
     for rec in active:
         c = by_name[rec["name"]]
-        toggle = "⏸" if c.get("enabled") else "▶"
         label = f"{rec['name']} · {_dt_short(rec['created_at'])} · {_handshake_ago(c)}"
-        rows.append([
-            InlineKeyboardButton(label, callback_data=f"pinfo:{c['id']}"),
-            InlineKeyboardButton("✏️", callback_data=f"ren:{c['id']}:{rec['name'][:40]}"),
-            InlineKeyboardButton(toggle, callback_data=f"ptog:{c['id']}"),
-            InlineKeyboardButton("🗑", callback_data=f"del:{c['id']}:{rec['name'][:40]}"),
-        ])
-    rows.append([InlineKeyboardButton("👥 Users", callback_data="menu:users")])
-    rows.append([InlineKeyboardButton("❌ Close", callback_data="cancel")])
+        rows.append([InlineKeyboardButton(label, callback_data=f"pinfo:{c['id']}")])
+    rows.append(_back_close_row(f"user:{username}"))
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _peer_info_view(client_id):
+    try:
+        c = wg.get_client(client_id)
+    except Exception:
+        return None
+    name = str(c.get("name", ""))
+    rec = users_db.get_peer(name)
+    owner = rec["owner"] if rec else None
+    status = "🟢 enabled" if c.get("enabled") else "🔴 disabled"
+    ip = c.get("ipv4Address") or "N/A"
+    created = _dt_short(rec["created_at"], with_time=True) if rec else "—"
+    hs = c.get("latestHandshakeAt")
+    parsed_hs = None
+    if hs:
+        try:
+            parsed_hs = datetime.fromisoformat(str(hs).replace("Z", "+00:00"))
+        except ValueError:
+            parsed_hs = None
+    hs_line = f"{_dt_short(hs, with_time=True)} ({_handshake_ago(c)} ago)" if parsed_hs is not None else "never"
+    lines = [f"🔹 <b>{html.escape(name)}</b>"]
+    if owner:
+        lines.append(f"Owner: @{owner}")
+    lines.append(f"Status: {status}")
+    lines.append(f"IP: {ip}")
+    lines.append(f"Created: {created}")
+    lines.append(f"Last handshake: {hs_line}")
+    toggle = "⏸ Disable" if c.get("enabled") else "▶ Enable"
+    rows = [
+        [InlineKeyboardButton("📄 Get config", callback_data=f"cfg:{client_id}"), InlineKeyboardButton(toggle, callback_data=f"ptog:{client_id}")],
+        [InlineKeyboardButton("✏️ Rename", callback_data=f"ren:{client_id}:{name[:40]}"), InlineKeyboardButton("🗑 Delete", callback_data=f"del:{client_id}:{name[:40]}")],
+    ]
+    if owner:
+        rows.append(_back_close_row(f"upeers:{owner}"))
+    else:
+        rows.append([InlineKeyboardButton("👥 Users", callback_data="menu:users"), InlineKeyboardButton("❌ Close", callback_data="cancel")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -1329,50 +1388,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Admins only.")
             return
         client_id = data.split(":", 1)[1]
-        try:
-            c = wg.get_client(client_id)
-        except Exception:
+        view = _peer_info_view(client_id)
+        if view is None:
             await query.edit_message_text(
                 "Peer not found.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("👥 Users", callback_data="menu:users")],
-                    [InlineKeyboardButton("❌ Close", callback_data="cancel")],
-                ]),
+                reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
             )
             return
-        name = str(c.get("name", ""))
-        rec = users_db.get_peer(name)
-        owner = rec["owner"] if rec else None
-        status = "🟢 enabled" if c.get("enabled") else "🔴 disabled"
-        ip = c.get("ipv4Address") or "N/A"
-        created = _dt_short(rec["created_at"], with_time=True) if rec else "—"
-        hs = c.get("latestHandshakeAt")
-        parsed_hs = None
-        if hs:
-            try:
-                parsed_hs = datetime.fromisoformat(str(hs).replace("Z", "+00:00"))
-            except ValueError:
-                parsed_hs = None
-        hs_line = f"{_dt_short(hs, with_time=True)} ({_handshake_ago(c)} ago)" if parsed_hs is not None else "never"
-        lines = [f"🔹 <b>{html.escape(name)}</b>"]
-        if owner:
-            lines.append(f"Owner: @{owner}")
-        lines.append(f"Status: {status}")
-        lines.append(f"IP: {ip}")
-        lines.append(f"Created: {created}")
-        lines.append(f"Last handshake: {hs_line}")
-        if owner:
-            nav = [InlineKeyboardButton("◀ Back", callback_data=f"user:{owner}"), InlineKeyboardButton("❌ Close", callback_data="cancel")]
-        else:
-            nav = [InlineKeyboardButton("👥 Users", callback_data="menu:users"), InlineKeyboardButton("❌ Close", callback_data="cancel")]
-        await query.edit_message_text(
-            "\n".join(lines),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📄 Get config", callback_data=f"cfg:{client_id}")],
-                nav,
-            ]),
-        )
+        text, kb = view
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
         return
 
     if data.startswith("ptog:"):
@@ -1385,10 +1409,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await query.edit_message_text(
                 "Peer not found.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("👥 Users", callback_data="menu:users")],
-                    [InlineKeyboardButton("❌ Close", callback_data="cancel")],
-                ]),
+                reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
             )
             return
         owner = users_db.peer_owner(str(c.get("name", "")))
@@ -1403,20 +1424,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if owner is None:
             await query.edit_message_text(
                 "✅ Peer updated.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("👥 Users", callback_data="menu:users")],
-                    [InlineKeyboardButton("❌ Close", callback_data="cancel")],
-                ]),
+                reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
             )
             return
-        view = _user_detail_view(owner)
+        view = _peer_info_view(client_id)
         if view is None:
             await query.edit_message_text(
-                "User not found.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("👥 Users", callback_data="menu:users")],
-                    [InlineKeyboardButton("❌ Close", callback_data="cancel")],
-                ]),
+                "Peer not found.",
+                reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
             )
             return
         text, kb = view
@@ -1451,6 +1466,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = [f"📜 Requests of <b>{html.escape(username)}</b> (last {len(reqs)}):"]
         lines += [_format_request_line(r) for r in reqs]
         await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=back_kb)
+        return
+
+    if data.startswith("upeers:"):
+        if not users_db.is_admin(user):
+            await query.edit_message_text("Admins only.")
+            return
+        username = data.split(":", 1)[1]
+        view = _peers_list_view(username)
+        if view is None:
+            await query.edit_message_text("User not found.")
+            return
+        text, kb = view
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
         return
 
     if data.startswith("user:"):
@@ -1493,10 +1521,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             msg,
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("👥 Users", callback_data="menu:users")],
-                [InlineKeyboardButton("❌ Close", callback_data="cancel")],
-            ]),
+            reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
         )
         return
 
@@ -1521,10 +1546,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             msg,
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("👥 Users", callback_data="menu:users")],
-                [InlineKeyboardButton("❌ Close", callback_data="cancel")],
-            ]),
+            reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
         )
         return
 
@@ -1546,10 +1568,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             msg,
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("👥 Users", callback_data="menu:users")],
-                [InlineKeyboardButton("❌ Close", callback_data="cancel")],
-            ]),
+            reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
         )
         return
 
@@ -1724,10 +1743,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not owns_client(user, client):
             await query.edit_message_text("Access denied.")
             return
+        owner = users_db.peer_owner(str(client.get("name", "")).lower())
         try:
             wg.delete_client(client_id)
             users_db.remove_peer(str(client.get("name", "")).lower())
-            await query.edit_message_text("✅ Peer deleted.")
+            if owner and users_db.is_admin(user):
+                await query.edit_message_text(
+                    "✅ Peer deleted.",
+                    reply_markup=InlineKeyboardMarkup([_back_close_row(f"upeers:{owner}")]),
+                )
+            else:
+                await query.edit_message_text("✅ Peer deleted.")
         except Exception as e:
             await query.edit_message_text(f"API error: {e}")
         return
