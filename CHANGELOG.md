@@ -23,7 +23,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- Peer rename function and cancel action during peer creation.
+- Peer rename function; rename, delete and get-config options are available after searching a peer.
+
+### Fixed
+
+- Cancel button during peer creation; pressed button names no longer leak into prompts.
 
 ### Changed
 
@@ -31,9 +35,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.0.2] - 2026-03-23
 
-### Changed
+### Fixed
 
-- Improved type annotations.
+- 401 error when working through insecure plain http connection.
+- Confusing annotation for the WG Tunnel app.
 
 ## [0.0.1] - 2026-03-23
 
