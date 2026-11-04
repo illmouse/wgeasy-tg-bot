@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- Peer names are now short random hashes (8 characters, `a-z0-9`); peer ownership is tracked in the bot's SQLite database instead of being encoded in the peer name. This removes any dependency on Telegram username length, and names always fit the 15-character AmneziaWG (Android) tunnel-name limit. Peer renames are validated against the same limit and character set.
+- Admin peer creation now asks how to proceed: pick a registered user from the database (auto-generated hash name) or set the full peer name manually (`/create` without arguments or the menu button). `/create <username>` for a specific user still works.
+
+### Added
+
+- `/givemepowers` — access requests: registered users get their peers and limit; unknown users send an approval request (stored in the database) to all reachable admins, who approve or decline right from the chat; the requester is notified of the outcome.
+- `/ban <username>` / `/unban <username>` — temporarily block a user: the bot stops responding to them (only a "temporarily blocked" notice) and their peers are disabled in wg-easy; unbanning re-enables the peers. Banned users are marked with 🔒 in `/users`.
+
 ## [0.2.1b] - 2026-11-04
 
 ### Fixed

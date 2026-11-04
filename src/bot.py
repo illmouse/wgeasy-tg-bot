@@ -1,6 +1,7 @@
 import html
 import logging
 import os
+import re
 import secrets
 import string
 from datetime import datetime, timedelta, timezone
@@ -58,8 +59,12 @@ users_db.set_bootstrap_sets(_parse_env_set("ADMIN_USERNAMES"), _parse_env_set("U
 WAITING_FOR_SEARCH = 2
 WAITING_FOR_RENAME = 3
 WAITING_FOR_NEWUSER = 4
+WAITING_FOR_NEWNAME = 5
 
 PAGE_SIZE = 8
+MAX_PEER_NAME_LEN = 15
+PEER_NAME_LEN = 8
+PEER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,15}$")
 
 ADMIN_KEYBOARD = ReplyKeyboardMarkup(
     [
@@ -123,6 +128,11 @@ INLINE_MENU_USER = InlineKeyboardMarkup([
     ],
 ])
 
+CREATE_MENU = InlineKeyboardMarkup([
+    [InlineKeyboardButton("👥 Pick a user", callback_data="create:pickuser")],
+    [InlineKeyboardButton("✏️ Set name yourself", callback_data="create:name")],
+])
+
 AMNEZIA_LINKS = (
     "\n\n📱 <b>Install a WireGuard client — two options:</b>\n\n"
     "<b>AmneziaWG</b>\n"
@@ -166,6 +176,10 @@ def require_access(func):
         if user is None:
             _log_unauthorized(update)
             return ConversationHandler.END
+        if users_db.is_banned(user):
+            if update.effective_message:
+                await update.effective_message.reply_text("You are temporarily blocked. Contact an administrator.")
+            return ConversationHandler.END
         context.user_data['_user'] = user
         return await func(update, context)
     return wrapper
@@ -177,6 +191,10 @@ def require_admin(func):
         user = get_user(update)
         if user is None:
             _log_unauthorized(update)
+            return ConversationHandler.END
+        if users_db.is_banned(user):
+            if update.effective_message:
+                await update.effective_message.reply_text("You are temporarily blocked. Contact an administrator.")
             return ConversationHandler.END
         if not users_db.is_admin(user):
             msg = update.effective_message
@@ -192,8 +210,7 @@ def owns_client(user: User, client: dict) -> bool:
     if users_db.is_admin(user):
         return True
     name = str(client.get('name', '')).lower()
-    prefix = user.username + '_'
-    return name.startswith(prefix)
+    return users_db.peer_owner(name) == user.username
 
 
 def visible_clients(user: User, clients: list) -> list:
@@ -206,15 +223,12 @@ def visible_clients(user: User, clients: list) -> list:
     return out
 
 
-def generate_peer_name(prefix: str, existing_names: set[str]) -> str:
-    p = str(prefix).strip().lower()
+def generate_peer_name(existing_names: set[str]) -> str:
     for _ in range(5):
-        h = ''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(6))
-        name = f"{p}_{h}"
+        name = ''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(PEER_NAME_LEN))
         if name not in existing_names:
             return name
-    h = ''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(6))
-    return f"{p}_{h}"
+    return ''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(PEER_NAME_LEN))
 
 
 def filter_clients(clients: list, query: str) -> list:
@@ -284,6 +298,72 @@ def format_active_peers_text(clients: list) -> str:
     return "\n".join(lines) if lines else ""
 
 
+def _format_users_lines() -> list[str]:
+    lines = []
+    for u in users_db.list_users():
+        lim = "∞" if u.config_limit == -1 else str(u.config_limit)
+        tg = str(u.tg_id) if u.tg_id is not None else "pending"
+        prefix = "🔒 " if u.status == "banned" else ""
+        lines.append(f"{prefix}<b>{html.escape(u.username)}</b> [{u.role}] limit {lim} tg:{tg}")
+    return lines
+
+
+async def _create_peer_for(update: Update, target: str, custom_name, message=None):
+    if message is None:
+        message = update.effective_message
+    if message is None:
+        return
+    try:
+        clients = wg.list_clients()
+    except Exception as e:
+        await message.reply_text(f"API error: {e}")
+        return
+    live_names = {str(c.get("name", "")).lower() for c in clients}
+    db_names = set(users_db.peers_of(target))
+    active = db_names & live_names
+    target_user = users_db.get_user(target)
+    target_limit = target_user.config_limit if target_user is not None else -1
+    if target_limit != -1 and len(active) >= target_limit:
+        await message.reply_text(f"Limit reached: {len(active)}/{target_limit}. Delete a peer to free a slot.")
+        return
+    if custom_name is not None:
+        if not PEER_NAME_RE.match(custom_name):
+            await message.reply_text("Invalid name: use 1-15 chars, letters/digits/_/- only.")
+            return
+        if custom_name.lower() in (live_names | db_names):
+            await message.reply_text(
+                f"A peer named <b>{html.escape(custom_name)}</b> already exists. Choose another name.",
+                parse_mode="HTML",
+            )
+            return
+        peer_name = custom_name
+    else:
+        peer_name = generate_peer_name(live_names | db_names)
+    try:
+        result = wg.create_client(peer_name)
+    except Exception as e:
+        await message.reply_text(f"API error: {e}")
+        return
+    client_id = result.get("clientId")
+    try:
+        users_db.add_peer(peer_name.lower(), target, client_id)
+    except Exception:
+        logger.warning("Failed to persist peer %s for %s", peer_name, target)
+    try:
+        config_data, filename = wg.get_client_config(client_id)
+        await message.reply_document(
+            document=BytesIO(config_data),
+            filename=filename,
+            caption=f"✅ Peer <b>{html.escape(peer_name)}</b> created for <b>{html.escape(target)}</b>!\n\n{AMNEZIA_LINKS}",
+            parse_mode="HTML",
+        )
+    except Exception:
+        await message.reply_text(
+            f"✅ Peer <b>{html.escape(peer_name)}</b> created for <b>{html.escape(target)}</b>!",
+            parse_mode="HTML",
+        )
+
+
 async def _show_peer_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str):
     user = get_user(update)
     if user is None:
@@ -325,6 +405,51 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("WireGuard Manager", reply_markup=INLINE_MENU_ADMIN)
     else:
         await update.message.reply_text("WireGuard Manager", reply_markup=INLINE_MENU_USER)
+
+
+async def givemepowers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    if u is None:
+        return
+    user = get_user(update)
+    if user is not None:
+        if users_db.is_banned(user):
+            await update.effective_message.reply_text("You are temporarily blocked. Contact an administrator.")
+            return
+        limit = user.config_limit if user.config_limit != -1 else "∞"
+        try:
+            clients = visible_clients(user, wg.list_clients())
+        except Exception as e:
+            logger.warning("Failed to list peers for %s: %s", user.username, e)
+            await update.effective_message.reply_text("Powers already granted ✅")
+            return
+        await update.effective_message.reply_text(
+            "Powers already granted ✅\n\n" + format_peers_text(clients) + f"\n\nLimit: {len(clients)}/{limit}",
+            parse_mode="HTML",
+        )
+        return
+    admins = users_db.admins_with_tg()
+    if not admins:
+        await update.effective_message.reply_text("No admins available to review right now. Try again later.")
+        return
+    if users_db.has_pending_request(u.id):
+        await update.effective_message.reply_text("Your request is already pending review.")
+        return
+    req_id = users_db.add_request(u.id, u.username, u.first_name, u.last_name)
+    label = f"@{u.username}" if u.username else ((u.first_name or "") + (" " + u.last_name if u.last_name else "")).strip() or f"id {u.id}"
+    for admin in admins:
+        try:
+            await context.bot.send_message(
+                admin.tg_id,
+                f"🔔 Access request #{req_id}\nUser: {label} (id: {u.id})",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Approve", callback_data=f"req:approve:{req_id}"),
+                    InlineKeyboardButton("❌ Decline", callback_data=f"req:decline:{req_id}"),
+                ]]),
+            )
+        except Exception:
+            logger.warning("Failed to notify admin %s", admin.username)
+    await update.effective_message.reply_text("Request sent to admins. You'll be notified when reviewed.")
 
 
 @require_access
@@ -375,56 +500,57 @@ async def delete_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def create_peer_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(update)
     if user is None:
-        return
-    target = user.username
-    if users_db.is_admin(user) and context.args:
-        candidate = str(context.args[0]).strip().lstrip("@").lower()
-        if not users_db.user_exists(candidate):
+        _log_unauthorized(update)
+        return ConversationHandler.END
+    if users_db.is_banned(user):
+        if update.effective_message:
+            await update.effective_message.reply_text("You are temporarily blocked. Contact an administrator.")
+        return ConversationHandler.END
+    if not users_db.is_admin(user):
+        await _create_peer_for(update, user.username, None)
+        return ConversationHandler.END
+    if context.args:
+        target = users_db.get_user(context.args[0])
+        if target is None:
             await update.effective_message.reply_text("User not found.")
-            return
-        target = candidate
-    try:
-        clients = wg.list_clients()
-    except Exception as e:
-        await update.effective_message.reply_text(f"API error: {e}")
-        return
-    prefix = f"{target}_"
-    count = sum(1 for c in clients if str(c.get("name", "")).lower().startswith(prefix))
-    target_limit = user.config_limit
-    for u in users_db.list_users():
-        if u.username == target:
-            target_limit = u.config_limit
-            break
-    if target_limit != -1 and count >= target_limit:
-        await update.effective_message.reply_text(
-            f"Limit reached: {count}/{target_limit}. Delete a peer to free a slot."
-        )
-        return
-    existing_names = {str(c.get("name", "")).lower() for c in clients}
-    peer_name = generate_peer_name(target, existing_names)
-    try:
-        result = wg.create_client(peer_name)
-        client_id = result.get("clientId")
-        if client_id:
-            try:
-                config_data, filename = wg.get_client_config(client_id)
-                await update.effective_message.reply_document(
-                    document=BytesIO(config_data),
-                    filename=filename,
-                    caption=f"✅ Peer <b>{html.escape(peer_name)}</b> created!" + AMNEZIA_LINKS,
-                    parse_mode="HTML",
-                )
-                return
-            except Exception:
-                pass
-        await update.effective_message.reply_text(
-            f"✅ Peer <b>{html.escape(peer_name)}</b> created!" + AMNEZIA_LINKS,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-    except Exception as e:
-        await update.effective_message.reply_text(f"API error: {e}")
-        return
+            return ConversationHandler.END
+        await _create_peer_for(update, target.username, None)
+        return ConversationHandler.END
+    await update.effective_message.reply_text("Create peer:", reply_markup=CREATE_MENU)
+    return ConversationHandler.END
+
+
+async def create_name_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = get_user(update)
+    if user is None:
+        _log_unauthorized(update)
+        return ConversationHandler.END
+    if users_db.is_banned(user):
+        try:
+            await query.edit_message_text("You are temporarily blocked. Contact an administrator.")
+        except Exception:
+            pass
+        return ConversationHandler.END
+    if not users_db.is_admin(user):
+        await query.edit_message_text("Admins only.")
+        return ConversationHandler.END
+    await query.edit_message_text("Enter peer name:", reply_markup=CANCEL_CONV_KB)
+    return WAITING_FOR_NEWNAME
+
+
+@require_admin
+async def create_name_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = context.user_data.get("_user") or get_user(update)
+    if user is None:
+        return ConversationHandler.END
+    name = (update.message.text or "").strip()
+    if not PEER_NAME_RE.match(name):
+        await update.message.reply_text("Invalid name: use 1-15 chars, letters/digits/_/- only.")
+        return WAITING_FOR_NEWNAME
+    await _create_peer_for(update, user.username, name)
+    return ConversationHandler.END
 
 
 # ── Search ─────────────────────────────────────────────────────────────────────
@@ -493,6 +619,10 @@ async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(update)
     if user is None:
         return ConversationHandler.END
+    if users_db.is_banned(user):
+        if update.effective_message:
+            await update.effective_message.reply_text("You are temporarily blocked. Contact an administrator.")
+        return ConversationHandler.END
     if users_db.is_admin(user):
         await update.message.reply_text("Cancelled.", reply_markup=ADMIN_KEYBOARD)
     else:
@@ -503,7 +633,14 @@ async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if get_user(update) is None:
+    user = get_user(update)
+    if user is None:
+        return ConversationHandler.END
+    if users_db.is_banned(user):
+        try:
+            await query.edit_message_text("You are temporarily blocked. Contact an administrator.")
+        except Exception:
+            pass
         return ConversationHandler.END
     await query.edit_message_text("Cancelled.")
     return ConversationHandler.END
@@ -517,6 +654,12 @@ async def rename_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(update)
     if user is None:
         _log_unauthorized(update)
+        return ConversationHandler.END
+    if users_db.is_banned(user):
+        try:
+            await query.edit_message_text("You are temporarily blocked. Contact an administrator.")
+        except Exception:
+            pass
         return ConversationHandler.END
     if not users_db.is_admin(user):
         await query.edit_message_text("Admins only.")
@@ -540,13 +683,21 @@ async def rename_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not new_name:
         await update.message.reply_text("Name cannot be empty. Enter new name:")
         return WAITING_FOR_RENAME
+    if len(new_name) > MAX_PEER_NAME_LEN:
+        await update.message.reply_text(
+            f"Name too long: max {MAX_PEER_NAME_LEN} characters (AmneziaWG tunnel name limit). Enter new name:"
+        )
+        return WAITING_FOR_RENAME
 
     client_id = context.user_data.get("rename_id")
-    old_name = context.user_data.get("rename_old", client_id)
+    old_display = context.user_data.get("rename_old", client_id)
     try:
+        current = wg.get_client(client_id)
+        old_name = str(current.get("name", "")).lower()
         wg.rename_client(client_id, new_name)
+        users_db.rename_peer(old_name, new_name)
         await update.message.reply_text(
-            f"✅ <b>{html.escape(old_name)}</b> → <b>{html.escape(new_name)}</b>",
+            f"✅ <b>{html.escape(old_display)}</b> → <b>{html.escape(new_name)}</b>",
             parse_mode="HTML",
         )
     except Exception as e:
@@ -623,11 +774,7 @@ async def users_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not users:
         await update.message.reply_text("No users.")
         return
-    lines = []
-    for u in users:
-        lim = "∞" if u.config_limit == -1 else str(u.config_limit)
-        tg = str(u.tg_id) if u.tg_id is not None else "pending"
-        lines.append(f"<b>{html.escape(u.username)}</b> [{u.role}] limit {lim} tg:{tg}")
+    lines = _format_users_lines()
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
@@ -662,6 +809,63 @@ async def deluser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("User not found.")
 
 
+@require_admin
+async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if len(args) != 1:
+        await update.message.reply_text("Usage: /ban <username>")
+        return
+    target = users_db.get_user(args[0])
+    if target is None:
+        await update.message.reply_text("User not found.")
+        return
+    if target.role == "admin":
+        await update.message.reply_text("Cannot ban an admin.")
+        return
+    admin = get_user(update)
+    users_db.ban_user(target.username, banned_by=admin.username if admin else None)
+    try:
+        clients = {str(c.get("name", "")).lower(): c for c in wg.list_clients()}
+        disabled = 0
+        for peer in users_db.peers_of(target.username):
+            c = clients.get(peer)
+            if c and c.get("enabled"):
+                wg.disable_client(c["id"])
+                disabled += 1
+        await update.message.reply_text(f"🔒 User {target.username} banned, {disabled} peer(s) disabled.")
+    except Exception as e:
+        logger.warning("Failed to disable peers for %s: %s", target.username, e)
+        await update.message.reply_text(f"User banned, but peer disable failed: {e}")
+
+
+@require_admin
+async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if len(args) != 1:
+        await update.message.reply_text("Usage: /unban <username>")
+        return
+    target = users_db.get_user(args[0])
+    if target is None:
+        await update.message.reply_text("User not found.")
+        return
+    if target.role == "admin":
+        await update.message.reply_text("Cannot unban an admin.")
+        return
+    users_db.unban_user(target.username)
+    try:
+        clients = {str(c.get("name", "")).lower(): c for c in wg.list_clients()}
+        enabled = 0
+        for peer in users_db.peers_of(target.username):
+            c = clients.get(peer)
+            if c and c.get("enabled") == False:
+                wg.enable_client(c["id"])
+                enabled += 1
+        await update.message.reply_text(f"🔓 User {target.username} unbanned, {enabled} peer(s) enabled.")
+    except Exception as e:
+        logger.warning("Failed to enable peers for %s: %s", target.username, e)
+        await update.message.reply_text(f"User unbanned, but peer enable failed: {e}")
+
+
 # ── Callback handler ──────────────────────────────────────────────────────────
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -670,6 +874,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(update)
     if user is None:
         _log_unauthorized(update)
+        return
+    if users_db.is_banned(user):
+        try:
+            await query.edit_message_text("You are temporarily blocked. Contact an administrator.")
+        except Exception:
+            pass
         return
     context.user_data['_user'] = user
 
@@ -680,6 +890,82 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "cancel":
         await query.edit_message_text("Cancelled.")
+        return
+
+    if data == "create:pickuser":
+        if not users_db.is_admin(user):
+            await query.edit_message_text("Admins only.")
+            return
+        users = users_db.list_users()
+        if not users:
+            await query.edit_message_text("No registered users.")
+            return
+        rows = []
+        for u in users:
+            lim = u.config_limit if u.config_limit != -1 else "∞"
+            rows.append([InlineKeyboardButton(
+                f"{u.username} ({u.role}, limit {lim})",
+                callback_data=f"createfor:{u.username}",
+            )])
+        rows.append([InlineKeyboardButton("Cancel", callback_data="cancel")])
+        await query.edit_message_text("Create peer for:", reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data.startswith("createfor:"):
+        if not users_db.is_admin(user):
+            await query.edit_message_text("Admins only.")
+            return
+        target = data.split(":", 1)[1]
+        if not users_db.user_exists(target):
+            await query.edit_message_text("User not found.")
+            return
+        await query.edit_message_text(f"Creating a peer for {target}...")
+        await _create_peer_for(update, target, None, message=query.message)
+        return
+
+    if data.startswith("req:"):
+        if not users_db.is_admin(user):
+            await query.edit_message_text("Admins only.")
+            return
+        parts = data.split(":")
+        action = parts[1]
+        try:
+            req_id = int(parts[2])
+        except Exception:
+            return
+        req = users_db.get_request(req_id)
+        if req is None or req["status"] != "pending":
+            await query.edit_message_text("Request already processed.")
+            return
+        if action == "approve":
+            uname = req["username"] or f"user{req['tg_id']}"
+            try:
+                created = users_db.add_user(uname, tg_id=req["tg_id"])
+            except ValueError:
+                users_db.decide_request(req_id, "approved", user.tg_id, user.username)
+                await query.edit_message_text("User already exists (request resolved).")
+                return
+            users_db.decide_request(req_id, "approved", user.tg_id, user.username)
+            try:
+                await context.bot.send_message(
+                    req["tg_id"],
+                    f"✅ You are registered! Your config limit: {created.config_limit}.\nUse /start to begin.",
+                )
+            except Exception:
+                logger.warning("Failed to notify user %s about approval", req["tg_id"])
+            await query.edit_message_text(f"✅ Request #{req_id} approved: {created.username} registered.")
+            return
+        if action == "decline":
+            users_db.decide_request(req_id, "declined", user.tg_id, user.username)
+            try:
+                await context.bot.send_message(
+                    req["tg_id"],
+                    f"❌ Your access request was declined by @{user.username}.",
+                )
+            except Exception:
+                logger.warning("Failed to notify user %s about decline", req["tg_id"])
+            await query.edit_message_text(f"❌ Request #{req_id} declined.")
+            return
         return
 
     # ── Inline menu ──
@@ -707,7 +993,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(text or "No peers active in the last 3 minutes.", parse_mode="HTML")
 
         elif action == "create":
-            await query.message.reply_text("Use /create or the button to create a peer.")
+            if users_db.is_admin(user):
+                await query.edit_message_text("Create peer:", reply_markup=CREATE_MENU)
+            else:
+                await _create_peer_for(update, user.username, None, message=query.message)
             return
 
         elif action == "search":
@@ -722,11 +1011,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not users:
                 await query.message.reply_text("No users.")
                 return
-            lines = []
-            for u in users:
-                lim = "∞" if u.config_limit == -1 else str(u.config_limit)
-                tg = str(u.tg_id) if u.tg_id is not None else "pending"
-                lines.append(f"<b>{html.escape(u.username)}</b> [{u.role}] limit {lim} tg:{tg}")
+            lines = _format_users_lines()
             await query.message.reply_text("\n".join(lines), parse_mode="HTML")
             return
 
@@ -839,6 +1124,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         try:
             wg.delete_client(client_id)
+            users_db.remove_peer(str(client.get("name", "")).lower())
             await query.edit_message_text("✅ Peer deleted.")
         except Exception as e:
             await query.edit_message_text(f"API error: {e}")
@@ -863,6 +1149,7 @@ def main():
             MessageHandler(filters.Text(["🔍 Search"]), search_start),
             CommandHandler("search", search_start),
             CallbackQueryHandler(rename_start, pattern="^ren:"),
+            CallbackQueryHandler(create_name_start, pattern="^create:name$"),
             MessageHandler(filters.Text(["➕ Add User"]), adduser_start),
             CommandHandler("adduser", adduser_start),
         ],
@@ -876,6 +1163,11 @@ def main():
                 MessageHandler(kb_filter, cancel_conv),
                 cancel_cb,
                 MessageHandler(filters.TEXT & ~filters.COMMAND, rename_receive),
+            ],
+            WAITING_FOR_NEWNAME: [
+                MessageHandler(kb_filter, cancel_conv),
+                cancel_cb,
+                MessageHandler(filters.TEXT & ~filters.COMMAND, create_name_receive),
             ],
             WAITING_FOR_NEWUSER: [
                 MessageHandler(kb_filter, cancel_conv),
@@ -900,6 +1192,9 @@ def main():
     app.add_handler(CommandHandler("users", users_list_cmd))
     app.add_handler(CommandHandler("limit", limit_cmd))
     app.add_handler(CommandHandler("deluser", deluser_cmd))
+    app.add_handler(CommandHandler("givemepowers", givemepowers_cmd))
+    app.add_handler(CommandHandler("ban", ban_cmd))
+    app.add_handler(CommandHandler("unban", unban_cmd))
     app.add_handler(CallbackQueryHandler(on_callback))
 
     admin_env = sorted(list(_parse_env_set("ADMIN_USERNAMES")))

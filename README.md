@@ -13,8 +13,9 @@ Telegram bot for managing [wg-easy](https://github.com/wg-easy/wg-easy) WireGuar
 - Paginated inline keyboards (8 peers per page)
 - Works in both private chats (reply keyboard) and group threads (`/menu` inline keyboard)
 - Role-based access: admins manage all peers and users; regular users see and manage only their own peers, limited by a per-user config limit
-- Peer names follow the `<username>_<random hash>` pattern
-- Admins add users via `/adduser` (forward a message from the user or send their username, optionally with a limit), and manage them with `/users`, `/limit`, and `/deluser`
+- Peer names are short random hashes; ownership is tracked in the bot's SQLite database, so any Telegram username length works and names fit the 15-character AmneziaWG tunnel-name limit
+- Admins add users via `/adduser` (forward a message from the user or send their username, optionally with a limit), and manage them with `/users`, `/limit`, `/deluser`, `/ban`, and `/unban`
+- Access requests: unregistered users can ask for access with `/givemepowers`; admins approve or decline right from the chat
 
 ## Setup
 
@@ -83,17 +84,22 @@ The bot stores users in a SQLite database. Mount a volume to persist `users.db` 
 |---|---|
 | `/start` | Show reply keyboard (private chat) |
 | `/menu` | Show inline keyboard (works everywhere) |
-| `/create` | Create a new peer; the name is auto-generated as `<username>_<hash>` (admin may pass `/create <username>` to create for another user) |
+| `/create` | Create a new peer: regular users get an auto-generated hash name for themselves; an admin without arguments picks a registered user or sets the name via buttons, and `/create <username>` creates for that user (max 15 chars, AmneziaWG limit) |
 | `/search <name>` | Search peers by name |
 | `/cancel` | Cancel current operation |
 | `/adduser` | Add a user — forward a message from them or send their username (admin only) |
-| `/users` | List users with role, limit, and Telegram ID (admin only) |
+| `/users` | List users with role, limit, and Telegram ID; banned users are marked with 🔒 (admin only) |
 | `/limit <username> <N>` | Set a user's peer limit; `-1` means unlimited (admin only) |
 | `/deluser <username>` | Remove a user (admin only) |
+| `/ban <username>` | Temporarily block a user and disable their peers (admin only) |
+| `/unban <username>` | Unblock a user and re-enable their peers (admin only) |
+| `/givemepowers` | For anyone: show your peers and limit if registered, otherwise send an access request to the admins |
 
 ### User management
 
 Admins add users with `/adduser` by either forwarding a message from the user or sending their username as text (optionally followed by a limit, e.g. `alice 5`). Users are stored in SQLite together with their Telegram ID and username. A user added by username only becomes bound to their Telegram ID on their first message to the bot.
+
+Users without access can request it with `/givemepowers`: the request is stored in the database and sent to all admins who have talked to the bot, with Approve/Decline buttons; the requester is notified of the outcome. Banning a user with `/ban` makes the bot respond with a temporary-blocked notice only and disables all their peers until `/unban`.
 
 ### Config file
 

@@ -58,6 +58,12 @@ class WGEasyAPI:
     def delete_client(self, client_id):
         return self._request("DELETE", f"/api/client/{client_id}").json()
 
+    def enable_client(self, client_id) -> dict:
+        return self._request("POST", f"/api/client/{client_id}/enable").json()
+
+    def disable_client(self, client_id) -> dict:
+        return self._request("POST", f"/api/client/{client_id}/disable").json()
+
     def get_client(self, client_id) -> dict:
         return self._request("GET", f"/api/client/{client_id}").json()
 

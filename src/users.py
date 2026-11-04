@@ -8,6 +8,7 @@ class User:
     username: str
     role: str
     config_limit: int
+    status: str = "active"
 
 
 class UserDB:
@@ -33,6 +34,42 @@ class UserDB:
             );
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS peers (
+              name       TEXT PRIMARY KEY,
+              client_id  TEXT,
+              owner      TEXT NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS requests (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              tg_id INTEGER NOT NULL,
+              username TEXT,
+              first_name TEXT,
+              last_name TEXT,
+              status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','declined')),
+              admin_id INTEGER,
+              admin_username TEXT,
+              requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+              decided_at TEXT
+            )
+            """
+        )
+        for statement in (
+            "ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+            "ALTER TABLE users ADD COLUMN banned_at TEXT",
+            "ALTER TABLE users ADD COLUMN banned_by TEXT",
+            "ALTER TABLE users ADD COLUMN banned_until TEXT",
+        ):
+            try:
+                cur.execute(statement)
+            except sqlite3.OperationalError:
+                pass
         self.conn.commit()
 
     def set_bootstrap_sets(self, admins: set[str], users: set[str]) -> None:
@@ -53,6 +90,7 @@ class UserDB:
             username=row["username"],
             role=row["role"],
             config_limit=row["config_limit"],
+            status=row["status"] if "status" in row.keys() else "active",
         )
 
     def resolve(self, tg_id: int | None, username: str | None) -> User | None:
@@ -160,3 +198,149 @@ class UserDB:
 
     def is_admin(self, user: User) -> bool:
         return user.role == "admin"
+
+    def has_pending_request(self, tg_id: int) -> bool:
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM requests WHERE tg_id = ? AND status = 'pending'",
+            (tg_id,),
+        )
+        return cur.fetchone() is not None
+
+    def add_request(
+        self,
+        tg_id: int,
+        username: str | None,
+        first_name: str | None,
+        last_name: str | None,
+    ) -> int:
+        uname = None
+        if username is not None:
+            uname = str(username).strip().lstrip("@").lower()
+            if not uname:
+                uname = None
+        cur = self.conn.cursor()
+        cur.execute(
+            "INSERT INTO requests (tg_id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
+            (tg_id, uname, first_name, last_name),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_request(self, req_id: int) -> dict | None:
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM requests WHERE id = ?", (req_id,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "tg_id": row["tg_id"],
+            "username": row["username"],
+            "first_name": row["first_name"],
+            "last_name": row["last_name"],
+            "status": row["status"],
+            "admin_id": row["admin_id"],
+            "admin_username": row["admin_username"],
+            "requested_at": row["requested_at"],
+            "decided_at": row["decided_at"],
+        }
+
+    def decide_request(
+        self,
+        req_id: int,
+        status: str,
+        admin_id: int,
+        admin_username: str,
+    ) -> bool:
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE requests SET status = ?, admin_id = ?, admin_username = ?, "
+            "decided_at = datetime('now') WHERE id = ? AND status = 'pending'",
+            (status, admin_id, admin_username, req_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def get_user(self, username: str) -> User | None:
+        uname = str(username).strip().lstrip("@").lower()
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM users WHERE username = ?", (uname,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_user(row)
+
+    def ban_user(self, username: str, banned_by: str | None = None) -> User:
+        uname = str(username).strip().lstrip("@").lower()
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE users SET status = 'banned', banned_at = datetime('now'), "
+            "banned_by = ? WHERE username = ?",
+            (banned_by, uname),
+        )
+        self.conn.commit()
+        if cur.rowcount == 0:
+            raise KeyError(username)
+        return self.get_user(uname)
+
+    def unban_user(self, username: str) -> User:
+        uname = str(username).strip().lstrip("@").lower()
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE users SET status = 'active', banned_at = NULL, banned_by = NULL, "
+            "banned_until = NULL WHERE username = ?",
+            (uname,),
+        )
+        self.conn.commit()
+        if cur.rowcount == 0:
+            raise KeyError(username)
+        return self.get_user(uname)
+
+    def admins_with_tg(self) -> list[User]:
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT * FROM users WHERE role = 'admin' AND tg_id IS NOT NULL "
+            "AND tg_id != -1 ORDER BY username"
+        )
+        return [self._row_to_user(r) for r in cur.fetchall()]
+
+    def is_banned(self, user: User) -> bool:
+        return user.status == "banned"
+
+    def _norm_owner(self, owner: str) -> str:
+        return str(owner).strip().lstrip("@").lower()
+
+    def add_peer(self, name: str, owner: str, client_id=None) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            "INSERT INTO peers (name, client_id, owner) VALUES (?, ?, ?)",
+            (str(name).lower(), None if client_id is None else str(client_id), self._norm_owner(owner)),
+        )
+        self.conn.commit()
+
+    def remove_peer(self, name: str) -> bool:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM peers WHERE name = ?", (str(name).lower(),))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def rename_peer(self, old_name: str, new_name: str) -> bool:
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE peers SET name = ? WHERE name = ?",
+            (str(new_name).lower(), str(old_name).lower()),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def peer_owner(self, name: str) -> str | None:
+        cur = self.conn.cursor()
+        cur.execute("SELECT owner FROM peers WHERE name = ?", (str(name).lower(),))
+        row = cur.fetchone()
+        return row["owner"] if row else None
+
+    def peers_of(self, owner: str) -> list[str]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT name FROM peers WHERE owner = ? ORDER BY name", (self._norm_owner(owner),))
+        return [r["name"] for r in cur.fetchall()]
