@@ -153,14 +153,18 @@ def is_admin(update: Update) -> bool:
     return users_db.is_admin(user)
 
 
+def _log_unauthorized(update: Update):
+    u = update.effective_user
+    logger.info("Ignoring unauthorized user %s (id=%s)",
+                getattr(u, 'username', None), getattr(u, 'id', None))
+
+
 def require_access(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = get_user(update)
         if user is None:
-            msg = update.effective_message
-            if msg:
-                await msg.reply_text("Access denied.")
+            _log_unauthorized(update)
             return ConversationHandler.END
         context.user_data['_user'] = user
         return await func(update, context)
@@ -172,9 +176,7 @@ def require_admin(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = get_user(update)
         if user is None:
-            msg = update.effective_message
-            if msg:
-                await msg.reply_text("Access denied.")
+            _log_unauthorized(update)
             return ConversationHandler.END
         if not users_db.is_admin(user):
             msg = update.effective_message
@@ -285,8 +287,6 @@ def format_active_peers_text(clients: list) -> str:
 async def _show_peer_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str):
     user = get_user(update)
     if user is None:
-        if update.effective_message:
-            await update.effective_message.reply_text("Access denied.")
         return
     try:
         clients = wg.list_clients()
@@ -336,7 +336,6 @@ async def list_peers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"API error: {e}")
         return
     if user is None:
-        await update.message.reply_text("Access denied.")
         return
     clients = visible_clients(user, clients)
     if not clients:
@@ -354,7 +353,6 @@ async def active_peers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"API error: {e}")
         return
     if user is None:
-        await update.message.reply_text("Access denied.")
         return
     clients = visible_clients(user, clients)
     text = format_active_peers_text(clients)
@@ -377,7 +375,6 @@ async def delete_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def create_peer_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(update)
     if user is None:
-        await update.effective_message.reply_text("Access denied.")
         return
     target = user.username
     if users_db.is_admin(user) and context.args:
@@ -450,9 +447,6 @@ async def search_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, term: str):
     user = get_user(update)
     if user is None:
-        msg = update.effective_message
-        if msg:
-            await msg.reply_text("Access denied.")
         return
     if not term:
         msg = update.effective_message
@@ -497,7 +491,9 @@ async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, term: s
 
 async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(update)
-    if user and users_db.is_admin(user):
+    if user is None:
+        return ConversationHandler.END
+    if users_db.is_admin(user):
         await update.message.reply_text("Cancelled.", reply_markup=ADMIN_KEYBOARD)
     else:
         await update.message.reply_text("Cancelled.", reply_markup=USER_KEYBOARD)
@@ -507,6 +503,8 @@ async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if get_user(update) is None:
+        return ConversationHandler.END
     await query.edit_message_text("Cancelled.")
     return ConversationHandler.END
 
@@ -518,10 +516,10 @@ async def rename_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user = get_user(update)
     if user is None:
-        await query.edit_message_text("Access denied.")
+        _log_unauthorized(update)
         return ConversationHandler.END
     if not users_db.is_admin(user):
-        await query.edit_message_text("Access denied.")
+        await query.edit_message_text("Admins only.")
         return ConversationHandler.END
 
     parts = query.data.split(":", 2)
@@ -671,7 +669,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user = get_user(update)
     if user is None:
-        await query.edit_message_text("Access denied.")
+        _log_unauthorized(update)
         return
     context.user_data['_user'] = user
 

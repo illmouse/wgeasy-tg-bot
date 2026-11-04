@@ -1,6 +1,10 @@
 import os
 import requests
 
+# wg-easy v15+ authenticates via /api/auth/password; older versions
+# (v14 and Amnezia forks) accept the same payload at /api/session.
+AUTH_PATHS = ("/api/auth/password", "/api/session")
+
 
 class WGEasyAPI:
     def __init__(self):
@@ -9,13 +13,24 @@ class WGEasyAPI:
         self.password = os.environ["WG_EASY_PASSWORD"]
         self.session = requests.Session()
         self._authenticated = False
+        self._auth_path = None
 
     def login(self):
-        resp = self.session.post(
-            f"{self.base_url}/api/session",
-            json={"username": self.username, "password": self.password, "remember": False},
-        )
-        resp.raise_for_status()
+        candidates = [self._auth_path] if self._auth_path else []
+        candidates += [p for p in AUTH_PATHS if p not in candidates]
+        resp = None
+        for path in candidates:
+            resp = self.session.post(
+                f"{self.base_url}{path}",
+                json={"username": self.username, "password": self.password, "remember": False},
+            )
+            if resp.status_code == 404:
+                continue
+            resp.raise_for_status()
+            self._auth_path = path
+            break
+        else:
+            resp.raise_for_status()
         # Strip the Secure flag so cookies are sent over plain HTTP too
         # (needed when connecting directly to wg-easy inside Docker without TLS)
         for cookie in self.session.cookies:
