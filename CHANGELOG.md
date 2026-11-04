@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.0] - 2026-11-04
+
+Stable release. Rolls up all changes shipped in the `0.2.x` beta line (`0.2.0b`–`0.2.4b`) since `0.1.0`.
+
+### Added
+
+- Role-based access control: `admin` and `user` roles configured via the `ADMIN_USERNAMES` and `USERNAMES` environment variables; regular users only see, create, download and delete their own peers, within a per-user limit (default from `DEFAULT_CONFIG_LIMIT`, default 3).
+- Admin user management from the bot: `/adduser` (forward a message from the user, or send `username [limit]`), `/users`, `/limit <username> <N>`, `/deluser <username>` (cascades: the user's peers are deleted from wg-easy and the bot database), `/ban <username>` / `/unban <username>` (temporarily block a user and disable their peers in wg-easy; unbanning re-enables them).
+- Interactive user management UI: tappable user list with peer counts; user card (limit, requests, ban, delete); peers card (one full-width row per peer with name, creation date and last handshake); peer details card (owner, status, IP, creation date, last handshake, config download, rename, enable/disable, delete).
+- `/givemepowers` access requests: unknown users send an approval request (stored in the database) to all reachable admins, who approve or decline right from the chat; the requester is notified of the outcome; registered users see their peers, limit and own request history.
+- Limit change requests: users get an "📈 Request Limit" button to ask for a new config limit; admins approve or decline inline, the user is notified.
+- Request history: `📜 Requests` admin menu button and `/requests` command show the global history; the user card has a per-user history view.
+- SQLite user database (`USERS_DB_PATH`, default `users.db`) storing users, peer ownership and access/limit requests.
+
+### Changed
+
+- **Breaking:** `ALLOWED_USERNAMES` is replaced by `ADMIN_USERNAMES` and `USERNAMES` — update your `.env` before upgrading.
+- Peer names are short random hashes (8 characters, `a-z0-9`); peer ownership is tracked in the bot's SQLite database instead of being encoded in the peer name. This removes any dependency on Telegram username length, and names always fit the 15-character AmneziaWG (Android) tunnel-name limit. Peer renames are validated against the same limit and character set.
+- Admin peer creation asks how to proceed: pick a registered user from the database (auto-generated hash name) or set the full peer name manually; `/create <username>` for a specific user still works.
+- Users without access no longer receive any messages from the bot; unauthorized access attempts are only logged.
+- wg-easy v15 compatibility: login now uses `POST /api/auth/password`, falling back to the old `POST /api/session` (v14 and Amnezia forks); the working endpoint is remembered and re-probed on server upgrades.
+
 ## [0.2.4b] - 2026-11-04
 
 ### Changed
