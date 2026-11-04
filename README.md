@@ -16,6 +16,8 @@ Telegram bot for managing [wg-easy](https://github.com/wg-easy/wg-easy) WireGuar
 - Peer names are short random hashes; ownership is tracked in the bot's SQLite database, so any Telegram username length works and names fit the 15-character AmneziaWG tunnel-name limit
 - Admins add users via `/adduser` (forward a message from the user or send their username, optionally with a limit), and manage them with `/users`, `/limit`, `/deluser`, `/ban`, and `/unban`
 - Access requests: unregistered users can ask for access with `/givemepowers`; admins approve or decline right from the chat
+- Limit change requests: users ask for a new peer limit with the "📈 Request Limit" button; admins approve or decline in chat
+- Interactive user management: `/users` lists users as buttons (peers/limit); tapping a user shows their peers with per-peer actions and delete/limit/ban actions on the user
 
 ## Setup
 
@@ -88,9 +90,9 @@ The bot stores users in a SQLite database. Mount a volume to persist `users.db` 
 | `/search <name>` | Search peers by name |
 | `/cancel` | Cancel current operation |
 | `/adduser` | Add a user — forward a message from them or send their username (admin only) |
-| `/users` | List users with role, limit, and Telegram ID; banned users are marked with 🔒 (admin only) |
+| `/users` | Interactive user list: tap a user to see their peers (config/rename/delete) and actions — delete user, change limit, ban/unban (admin only) |
 | `/limit <username> <N>` | Set a user's peer limit; `-1` means unlimited (admin only) |
-| `/deluser <username>` | Remove a user (admin only) |
+| `/deluser <username>` | Remove a user together with all their peers (admin only) |
 | `/ban <username>` | Temporarily block a user and disable their peers (admin only) |
 | `/unban <username>` | Unblock a user and re-enable their peers (admin only) |
 | `/givemepowers` | For anyone: show your peers and limit if registered, otherwise send an access request to the admins |
@@ -99,7 +101,7 @@ The bot stores users in a SQLite database. Mount a volume to persist `users.db` 
 
 Admins add users with `/adduser` by either forwarding a message from the user or sending their username as text (optionally followed by a limit, e.g. `alice 5`). Users are stored in SQLite together with their Telegram ID and username. A user added by username only becomes bound to their Telegram ID on their first message to the bot.
 
-Users without access can request it with `/givemepowers`: the request is stored in the database and sent to all admins who have talked to the bot, with Approve/Decline buttons; the requester is notified of the outcome. Banning a user with `/ban` makes the bot respond with a temporary-blocked notice only and disables all their peers until `/unban`.
+Users without access can request it with `/givemepowers`: the request is stored in the database and sent to all admins who have talked to the bot, with Approve/Decline buttons; the requester is notified of the outcome. Banning a user with `/ban` makes the bot respond with a temporary-blocked notice only and disables all their peers until `/unban`. Registered users can request a limit change via the "📈 Request Limit" button — such requests go to the admins with the same Approve/Decline flow. Deleting a user with `/deluser` (or the delete action in `/users`) also deletes all their peers from wg-easy and the database.
 
 ### Config file
 

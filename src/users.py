@@ -65,6 +65,8 @@ class UserDB:
             "ALTER TABLE users ADD COLUMN banned_at TEXT",
             "ALTER TABLE users ADD COLUMN banned_by TEXT",
             "ALTER TABLE users ADD COLUMN banned_until TEXT",
+            "ALTER TABLE requests ADD COLUMN type TEXT NOT NULL DEFAULT 'access'",
+            "ALTER TABLE requests ADD COLUMN requested_limit INTEGER",
         ):
             try:
                 cur.execute(statement)
@@ -199,11 +201,11 @@ class UserDB:
     def is_admin(self, user: User) -> bool:
         return user.role == "admin"
 
-    def has_pending_request(self, tg_id: int) -> bool:
+    def has_pending_request(self, tg_id: int, req_type: str = "access") -> bool:
         cur = self.conn.cursor()
         cur.execute(
-            "SELECT 1 FROM requests WHERE tg_id = ? AND status = 'pending'",
-            (tg_id,),
+            "SELECT 1 FROM requests WHERE tg_id = ? AND status = 'pending' AND type = ?",
+            (tg_id, req_type),
         )
         return cur.fetchone() is not None
 
@@ -213,6 +215,8 @@ class UserDB:
         username: str | None,
         first_name: str | None,
         last_name: str | None,
+        req_type: str = "access",
+        requested_limit: int | None = None,
     ) -> int:
         uname = None
         if username is not None:
@@ -221,8 +225,9 @@ class UserDB:
                 uname = None
         cur = self.conn.cursor()
         cur.execute(
-            "INSERT INTO requests (tg_id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
-            (tg_id, uname, first_name, last_name),
+            "INSERT INTO requests (tg_id, username, first_name, last_name, type, requested_limit) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (tg_id, uname, first_name, last_name, req_type, requested_limit),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -244,6 +249,8 @@ class UserDB:
             "admin_username": row["admin_username"],
             "requested_at": row["requested_at"],
             "decided_at": row["decided_at"],
+            "type": row["type"],
+            "requested_limit": row["requested_limit"],
         }
 
     def decide_request(

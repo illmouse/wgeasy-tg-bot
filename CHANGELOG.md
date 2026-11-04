@@ -16,6 +16,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `/givemepowers` — access requests: registered users get their peers and limit; unknown users send an approval request (stored in the database) to all reachable admins, who approve or decline right from the chat; the requester is notified of the outcome.
 - `/ban <username>` / `/unban <username>` — temporarily block a user: the bot stops responding to them (only a "temporarily blocked" notice) and their peers are disabled in wg-easy; unbanning re-enables the peers. Banned users are marked with 🔒 in `/users`.
 
+### Changed
+
+- `/deluser <username>` now cascades: the user's peers are deleted from wg-easy and removed from the bot database along with the user record.
+- `/users` (and the inline Users menu) is now interactive: every user is a tappable button showing peer count and limit; tapping a user opens their detail view with per-peer actions (config, rename, delete) and user actions (delete, change limit, ban/unban).
+
+### Added
+
+- Limit change requests: users get an "📈 Request Limit" button (reply keyboard and inline menu) to request a new config limit; the request is stored in the database and sent to all reachable admins with inline Approve/Decline buttons; the user is notified of the outcome.
+
 ## [0.2.1b] - 2026-11-04
 
 ### Fixed
