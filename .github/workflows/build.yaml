@@ -1,0 +1,182 @@
+name: Build All
+on:
+  push:
+    branches: ['**']
+    tags:
+      - 'v*'
+      - '*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: quay.io/buildah/stable:latest
+      options: --privileged --device /dev/fuse
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Determine build type and tags
+      id: vars
+      run: |
+        if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+          # Tag push - use the tag name
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          echo "build_type=tag" >> $GITHUB_OUTPUT
+          echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+          # Beta releases (b suffix) must not receive the 'latest' tag
+          case "$TAG_NAME" in
+            *b) echo "is_beta=true" >> $GITHUB_OUTPUT ;;
+            *)  echo "is_beta=false" >> $GITHUB_OUTPUT ;;
+          esac
+          echo "Building for TAG: ${TAG_NAME} (beta: ${{ steps.vars.outputs.is_beta }})"
+        else
+          # Branch push - use branch naming
+          BRANCH_NAME=$(echo "${GITHUB_REF#refs/heads/}" | sed 's/[^a-zA-Z0-9._-]/-/g')
+          echo "build_type=branch" >> $GITHUB_OUTPUT
+          echo "branch_name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+          echo "is_beta=false" >> $GITHUB_OUTPUT
+          echo "Building for BRANCH: ${BRANCH_NAME}"
+        fi
+
+    - name: Login to GHCR
+      run: |
+        echo "${{ secrets.GITHUB_TOKEN }}" | buildah login ghcr.io -u ${{ github.actor }} --password-stdin
+
+    - name: Build image
+      run: |
+        if [ "${{ steps.vars.outputs.build_type }}" == "tag" ]; then
+          # Build for tag/release; 'latest' only for stable releases
+          if [ "${{ steps.vars.outputs.is_beta }}" == "true" ]; then
+            buildah bud \
+              --tag ghcr.io/${{ github.repository_owner }}/wgeasy-tg-bot:${{ steps.vars.outputs.tag_name }} \
+              .
+          else
+            buildah bud \
+              --tag ghcr.io/${{ github.repository_owner }}/wgeasy-tg-bot:${{ steps.vars.outputs.tag_name }} \
+              --tag ghcr.io/${{ github.repository_owner }}/wgeasy-tg-bot:latest \
+              .
+          fi
+        else
+          # Build for branch; main also keeps the legacy ':main' tag used by docker-compose.yml
+          if [ "${{ steps.vars.outputs.branch_name }}" == "main" ]; then
+            buildah bud \
+              --tag ghcr.io/${{ github.repository_owner }}/wgeasy-tg-bot:${{ github.sha }} \
+              --tag ghcr.io/${{ github.repository_owner }}/wgeasy-tg-bot:main \
+              --tag ghcr.io/${{ github.repository_owner }}/wgeasy-tg-bot:main-latest \
+              .
+          else
+            buildah bud \
+              --tag ghcr.io/${{ github.repository_owner }}/wgeasy-tg-bot:${{ github.sha }} \
+              --tag ghcr.io/${{ github.repository_owner }}/wgeasy-tg-bot:${{ steps.vars.outputs.branch_name }}-latest \
+              .
+          fi
+        fi
+
+    - name: Push image
+      run: |
+        if [ "${{ steps.vars.outputs.build_type }}" == "tag" ]; then
+          # Push tag/release images; 'latest' only for stable releases
+          if [ "${{ steps.vars.outputs.is_beta }}" == "true" ]; then
+            echo "Pushing beta release image (no 'latest' tag):"
+            echo "- ${{ steps.vars.outputs.tag_name }}"
+            buildah push ghcr.io/${{ github.repository_owner }}/wgeasy-tg-bot:${{ steps.vars.outputs.tag_name }}
+          else
+            echo "Pushing release images:"
+            echo "- ${{ steps.vars.outputs.tag_name }}"
+            echo "- latest"
+            buildah push ghcr.io/${{ github.repository_owner }}/wgeasy-tg-bot:${{ steps.vars.outputs.tag_name }}
+            buildah push ghcr.io/${{ github.repository_owner }}/wgeasy-tg-bot:latest
+          fi
+        else
+          # Push branch images
+          echo "Pushing branch images:"
+          echo "- ${{ github.sha }}"
+          buildah push ghcr.io/${{ github.repository_owner }}/wgeasy-tg-bot:${{ github.sha }}
+          if [ "${{ steps.vars.outputs.branch_name }}" == "main" ]; then
+            echo "- main"
+            echo "- main-latest"
+            buildah push ghcr.io/${{ github.repository_owner }}/wgeasy-tg-bot:main
+            buildah push ghcr.io/${{ github.repository_owner }}/wgeasy-tg-bot:main-latest
+          else
+            echo "- ${{ steps.vars.outputs.branch_name }}-latest"
+            buildah push ghcr.io/${{ github.repository_owner }}/wgeasy-tg-bot:${{ steps.vars.outputs.branch_name }}-latest
+          fi
+        fi
+
+  release:
+    name: Create GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Extract release notes from CHANGELOG.md
+      id: notes
+      env:
+        TAG_NAME: ${{ github.ref_name }}
+      run: |
+        VERSION="${TAG_NAME#v}"
+        # Extract the '## [X.Y.Z] - YYYY-MM-DD' section for this version.
+        # Literal index() match - version may contain regex metacharacters.
+        NOTES=$(awk -v header="## [${VERSION}] - " '
+          index($0, header) == 1 {found=1; next}
+          found && /^## \[/ {exit}
+          found {print}
+        ' CHANGELOG.md)
+        if [ -z "$NOTES" ]; then
+          echo "No '## [${VERSION}]' section found in CHANGELOG.md" >&2
+          exit 1
+        fi
+        {
+          echo "version=${VERSION}"
+          echo "prerelease<<EOF"
+          case "$VERSION" in
+            *b) echo "true" ;;
+            *)  echo "false" ;;
+          esac
+          echo "EOF"
+          echo "notes<<EOF"
+          printf '%s\n' "$NOTES"
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Skip if release already exists
+      id: check
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TAG_NAME: ${{ github.ref_name }}
+      run: |
+        if gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+          echo "Release '$TAG_NAME' already exists - leaving it untouched."
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Create release
+      if: steps.check.outputs.exists == 'false'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        RELEASE_NOTES: ${{ steps.notes.outputs.notes }}
+      run: |
+        printf '%s\n' "$RELEASE_NOTES" > release_notes.md
+        EXTRA_ARGS=""
+        if [ "${{ steps.notes.outputs.prerelease }}" = "true" ]; then
+          EXTRA_ARGS="--prerelease"
+          echo "Marking ${{ github.ref_name }} as pre-release (b suffix)."
+        fi
+        gh release create "${{ github.ref_name }}" \
+          --repo "$GITHUB_REPOSITORY" \
+          --title "Release ${{ github.ref_name }}" \
+          --notes-file release_notes.md \
+          $EXTRA_ARGS
