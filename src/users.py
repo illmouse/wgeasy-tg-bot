@@ -232,12 +232,7 @@ class UserDB:
         self.conn.commit()
         return cur.lastrowid
 
-    def get_request(self, req_id: int) -> dict | None:
-        cur = self.conn.cursor()
-        cur.execute("SELECT * FROM requests WHERE id = ?", (req_id,))
-        row = cur.fetchone()
-        if row is None:
-            return None
+    def _row_to_request(self, row: sqlite3.Row) -> dict:
         return {
             "id": row["id"],
             "tg_id": row["tg_id"],
@@ -252,6 +247,12 @@ class UserDB:
             "type": row["type"],
             "requested_limit": row["requested_limit"],
         }
+
+    def get_request(self, req_id: int) -> dict | None:
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM requests WHERE id = ?", (req_id,))
+        row = cur.fetchone()
+        return self._row_to_request(row) if row else None
 
     def decide_request(
         self,
@@ -268,6 +269,32 @@ class UserDB:
         )
         self.conn.commit()
         return cur.rowcount > 0
+
+    def list_requests(
+        self,
+        limit: int = 20,
+        tg_id: int | None = None,
+        username: str | None = None,
+    ) -> list[dict]:
+        uname = str(username).strip().lstrip("@").lower() if username is not None else None
+        if uname == "":
+            uname = None
+        base = "SELECT * FROM requests "
+        if tg_id is not None and uname is not None:
+            where = "WHERE (tg_id = ? OR username = ?)"
+            params = (tg_id, uname)
+        elif tg_id is not None:
+            where = "WHERE tg_id = ?"
+            params = (tg_id,)
+        elif uname is not None:
+            where = "WHERE username = ?"
+            params = (uname,)
+        else:
+            where = ""
+            params = ()
+        cur = self.conn.cursor()
+        cur.execute(base + where + " ORDER BY id DESC LIMIT ?", params + (limit,))
+        return [self._row_to_request(r) for r in cur.fetchall()]
 
     def get_user(self, username: str) -> User | None:
         uname = str(username).strip().lstrip("@").lower()
@@ -346,6 +373,38 @@ class UserDB:
         cur.execute("SELECT owner FROM peers WHERE name = ?", (str(name).lower(),))
         row = cur.fetchone()
         return row["owner"] if row else None
+
+    def get_peer(self, name: str) -> dict | None:
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT name, client_id, owner, created_at FROM peers WHERE name = ?",
+            (str(name).lower(),),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "name": row["name"],
+            "client_id": row["client_id"],
+            "owner": row["owner"],
+            "created_at": row["created_at"],
+        }
+
+    def peer_records(self, owner: str) -> list[dict]:
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT name, client_id, created_at FROM peers WHERE owner = ? "
+            "ORDER BY created_at DESC, name",
+            (self._norm_owner(owner),),
+        )
+        return [
+            {
+                "name": row["name"],
+                "client_id": row["client_id"],
+                "created_at": row["created_at"],
+            }
+            for row in cur.fetchall()
+        ]
 
     def peers_of(self, owner: str) -> list[str]:
         cur = self.conn.cursor()

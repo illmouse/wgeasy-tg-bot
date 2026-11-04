@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- Peer details view: tapping a peer's name in the user card shows its owner, status, IP, creation date (from the database) and last handshake, with a config download action.
+- Enable/disable toggle for each peer in the user card.
+- Request history: `📜 Requests` admin menu button and `/requests` command show the global request history; the user card has a per-user history button; registered users see their own requests in `/givemepowers`.
+
+### Changed
+
+- User card layout: one button row per peer (name, creation date, last handshake, rename / enable-disable / delete); `Users` and `Close` buttons are now full-width and stacked.
+
 ## [0.2.2b] - 2026-11-04
 
 ### Changed

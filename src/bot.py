@@ -114,6 +114,7 @@ INLINE_MENU_ADMIN = InlineKeyboardMarkup([
         InlineKeyboardButton("👥 Users", callback_data="menu:users"),
         InlineKeyboardButton("➕ Add User", callback_data="menu:adduser"),
     ],
+    [InlineKeyboardButton("📜 Requests", callback_data="menu:requests")],
 ])
 
 INLINE_MENU_USER = InlineKeyboardMarkup([
@@ -304,6 +305,59 @@ def format_active_peers_text(clients: list) -> str:
     return "\n".join(lines) if lines else ""
 
 
+def _dt_short(value, with_time=False):
+    if not value:
+        return "—"
+    try:
+        dt = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return "—"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.strftime("%d.%m %H:%M" if with_time else "%d.%m")
+
+
+def _handshake_ago(client):
+    hs = client.get("latestHandshakeAt")
+    if not hs:
+        return "—"
+    try:
+        hs_dt = datetime.fromisoformat(str(hs).replace("Z", "+00:00"))
+    except ValueError:
+        return "—"
+    if hs_dt.tzinfo is None:
+        hs_dt = hs_dt.replace(tzinfo=timezone.utc)
+    sec = (datetime.now(timezone.utc) - hs_dt).total_seconds()
+    if sec < 0:
+        sec = 0
+    if sec < 3600:
+        return f"{int(sec // 60)}m"
+    if sec < 86400:
+        return f"{int(sec // 3600)}h"
+    return f"{int(sec // 86400)}d"
+
+
+def _format_request_line(r):
+    status_icon = {"pending": "⏳", "approved": "✅", "declined": "❌"}.get(r.get("status"), "•")
+    type_icon = "📈" if r.get("type") == "limit" else "🔑"
+    if r.get("username"):
+        who = "@" + r["username"]
+    elif r.get("first_name") or r.get("last_name"):
+        who = html.escape(f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip())
+    else:
+        who = f"id {r['tg_id']}"
+    line = f"#{r['id']} {status_icon} {type_icon} {who}"
+    if r.get("type") == "limit" and r.get("requested_limit") is not None:
+        line += f" → {r['requested_limit']}"
+    line += f" · {_dt_short(r.get('requested_at'), with_time=True)}"
+    if r.get("status") != "pending" and r.get("admin_username"):
+        line += f" · by @{r['admin_username']}"
+    return line
+
+
 async def _create_peer_for(update: Update, target: str, custom_name, message=None):
     if message is None:
         message = update.effective_message
@@ -418,7 +472,8 @@ def _user_detail_view(username):
     except Exception:
         by_name = {}
         api_error = True
-    active = [n for n in users_db.peers_of(u.username) if not api_error and n in by_name]
+    records = users_db.peer_records(u.username)
+    active = [rec for rec in records if not api_error and rec["name"] in by_name]
     limit = "∞" if u.config_limit == -1 else str(u.config_limit)
     head = f"👤 <b>{html.escape(username)}</b> [{u.role}]"
     if u.status == "banned":
@@ -429,14 +484,7 @@ def _user_detail_view(username):
     if api_error:
         lines.append("⚠️ Peer list unavailable (API error).")
     elif active:
-        lines.append("Peers:")
-        for name in active:
-            c = by_name[name]
-            addr = c["ipv4Address"]
-            if c.get("enabled"):
-                lines.append(f"🟢 <code>{name}</code> — {addr}")
-            else:
-                lines.append(f"🔴 <code>{name}</code> — {addr} (disabled)")
+        lines.append("Peers — tap the name for details:")
     else:
         lines.append("Peers: none")
     rows = [[
@@ -447,17 +495,19 @@ def _user_detail_view(username):
         rows.append([InlineKeyboardButton("🔓 Unban", callback_data=f"unban:{username}")])
     else:
         rows.append([InlineKeyboardButton("🔒 Ban", callback_data=f"uban:{username}")])
-    for name in active:
-        c = by_name[name]
+    rows.append([InlineKeyboardButton("📜 Requests", callback_data=f"ureqs:{username}")])
+    for rec in active:
+        c = by_name[rec["name"]]
+        toggle = "⏸" if c.get("enabled") else "▶"
+        label = f"{rec['name']} · {_dt_short(rec['created_at'])} · {_handshake_ago(c)}"
         rows.append([
-            InlineKeyboardButton(f"📄 {name}", callback_data=f"cfg:{c['id']}"),
-            InlineKeyboardButton("✏️", callback_data=f"ren:{c['id']}:{name[:40]}"),
-            InlineKeyboardButton("🗑", callback_data=f"del:{c['id']}:{name[:40]}"),
+            InlineKeyboardButton(label, callback_data=f"pinfo:{c['id']}"),
+            InlineKeyboardButton("✏️", callback_data=f"ren:{c['id']}:{rec['name'][:40]}"),
+            InlineKeyboardButton(toggle, callback_data=f"ptog:{c['id']}"),
+            InlineKeyboardButton("🗑", callback_data=f"del:{c['id']}:{rec['name'][:40]}"),
         ])
-    rows.append([
-        InlineKeyboardButton("👥 Users", callback_data="menu:users"),
-        InlineKeyboardButton("❌ Close", callback_data="cancel"),
-    ])
+    rows.append([InlineKeyboardButton("👥 Users", callback_data="menu:users")])
+    rows.append([InlineKeyboardButton("❌ Close", callback_data="cancel")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -544,12 +594,17 @@ async def givemepowers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             clients = visible_clients(user, wg.list_clients())
         except Exception as e:
             logger.warning("Failed to list peers for %s: %s", user.username, e)
-            await update.effective_message.reply_text("Powers already granted ✅")
+            text = "Powers already granted ✅"
+            own = users_db.list_requests(limit=5, tg_id=user.tg_id)
+            if own:
+                text = text + "\n\n📜 Your requests:\n" + "\n".join(_format_request_line(r) for r in own)
+            await update.effective_message.reply_text(text, parse_mode="HTML")
             return
-        await update.effective_message.reply_text(
-            "Powers already granted ✅\n\n" + format_peers_text(clients) + f"\n\nLimit: {len(clients)}/{limit}",
-            parse_mode="HTML",
-        )
+        text = "Powers already granted ✅\n\n" + format_peers_text(clients) + f"\n\nLimit: {len(clients)}/{limit}"
+        own = users_db.list_requests(limit=5, tg_id=user.tg_id)
+        if own:
+            text = text + "\n\n📜 Your requests:\n" + "\n".join(_format_request_line(r) for r in own)
+        await update.effective_message.reply_text(text, parse_mode="HTML")
         return
     admins = users_db.admins_with_tg()
     if not admins:
@@ -1050,6 +1105,17 @@ async def users_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @require_admin
+async def requests_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reqs = users_db.list_requests(20)
+    if not reqs:
+        await update.effective_message.reply_text("No requests yet.")
+        return
+    lines = [f"📜 Request history (last {len(reqs)}):"]
+    lines += [_format_request_line(r) for r in reqs]
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+@require_admin
 async def limit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or len(context.args) < 2:
         await update.message.reply_text("Usage: /limit <username> <N>")
@@ -1258,6 +1324,135 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         return
 
+    if data.startswith("pinfo:"):
+        if not users_db.is_admin(user):
+            await query.edit_message_text("Admins only.")
+            return
+        client_id = data.split(":", 1)[1]
+        try:
+            c = wg.get_client(client_id)
+        except Exception:
+            await query.edit_message_text(
+                "Peer not found.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("👥 Users", callback_data="menu:users")],
+                    [InlineKeyboardButton("❌ Close", callback_data="cancel")],
+                ]),
+            )
+            return
+        name = str(c.get("name", ""))
+        rec = users_db.get_peer(name)
+        owner = rec["owner"] if rec else None
+        status = "🟢 enabled" if c.get("enabled") else "🔴 disabled"
+        ip = c.get("ipv4Address") or "N/A"
+        created = _dt_short(rec["created_at"], with_time=True) if rec else "—"
+        hs = c.get("latestHandshakeAt")
+        parsed_hs = None
+        if hs:
+            try:
+                parsed_hs = datetime.fromisoformat(str(hs).replace("Z", "+00:00"))
+            except ValueError:
+                parsed_hs = None
+        hs_line = f"{_dt_short(hs, with_time=True)} ({_handshake_ago(c)} ago)" if parsed_hs is not None else "never"
+        lines = [f"🔹 <b>{html.escape(name)}</b>"]
+        if owner:
+            lines.append(f"Owner: @{owner}")
+        lines.append(f"Status: {status}")
+        lines.append(f"IP: {ip}")
+        lines.append(f"Created: {created}")
+        lines.append(f"Last handshake: {hs_line}")
+        if owner:
+            nav = [InlineKeyboardButton("◀ Back", callback_data=f"user:{owner}"), InlineKeyboardButton("❌ Close", callback_data="cancel")]
+        else:
+            nav = [InlineKeyboardButton("👥 Users", callback_data="menu:users"), InlineKeyboardButton("❌ Close", callback_data="cancel")]
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📄 Get config", callback_data=f"cfg:{client_id}")],
+                nav,
+            ]),
+        )
+        return
+
+    if data.startswith("ptog:"):
+        if not users_db.is_admin(user):
+            await query.edit_message_text("Admins only.")
+            return
+        client_id = data.split(":", 1)[1]
+        try:
+            c = wg.get_client(client_id)
+        except Exception:
+            await query.edit_message_text(
+                "Peer not found.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("👥 Users", callback_data="menu:users")],
+                    [InlineKeyboardButton("❌ Close", callback_data="cancel")],
+                ]),
+            )
+            return
+        owner = users_db.peer_owner(str(c.get("name", "")))
+        try:
+            if c.get("enabled"):
+                wg.disable_client(client_id)
+            else:
+                wg.enable_client(client_id)
+        except Exception as e:
+            await query.edit_message_text(f"API error: {e}")
+            return
+        if owner is None:
+            await query.edit_message_text(
+                "✅ Peer updated.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("👥 Users", callback_data="menu:users")],
+                    [InlineKeyboardButton("❌ Close", callback_data="cancel")],
+                ]),
+            )
+            return
+        view = _user_detail_view(owner)
+        if view is None:
+            await query.edit_message_text(
+                "User not found.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("👥 Users", callback_data="menu:users")],
+                    [InlineKeyboardButton("❌ Close", callback_data="cancel")],
+                ]),
+            )
+            return
+        text, kb = view
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            pass
+        return
+
+    if data.startswith("ureqs:"):
+        if not users_db.is_admin(user):
+            await query.edit_message_text("Admins only.")
+            return
+        username = data.split(":", 1)[1]
+        target = users_db.get_user(username)
+        if target is None:
+            await query.edit_message_text("User not found.")
+            return
+        tg = target.tg_id if target.tg_id not in (None, -1) else None
+        reqs = users_db.list_requests(limit=10, tg_id=tg, username=username)
+        back_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀ Back", callback_data=f"user:{username}"),
+            InlineKeyboardButton("❌ Close", callback_data="cancel"),
+        ]])
+        if not reqs:
+            await query.edit_message_text(
+                f"📜 Requests of <b>{html.escape(username)}</b>: none yet.",
+                parse_mode="HTML",
+                reply_markup=back_kb,
+            )
+            return
+        lines = [f"📜 Requests of <b>{html.escape(username)}</b> (last {len(reqs)}):"]
+        lines += [_format_request_line(r) for r in reqs]
+        await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=back_kb)
+        return
+
     if data.startswith("user:"):
         if not users_db.is_admin(user):
             await query.edit_message_text("Admins only.")
@@ -1410,6 +1605,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("Admins only.")
                 return
             await query.message.reply_text("Use /adduser to add a user.")
+            return
+
+        elif action == "requests":
+            if not users_db.is_admin(user):
+                await query.edit_message_text("Admins only.")
+                return
+            reqs = users_db.list_requests(20)
+            if not reqs:
+                await query.edit_message_text("No requests yet.")
+                return
+            lines = [f"📜 Request history (last {len(reqs)}):"]
+            lines += [_format_request_line(r) for r in reqs]
+            await query.edit_message_text(
+                "\n".join(lines),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Close", callback_data="cancel")]]),
+            )
             return
 
         elif action in ("config", "delete"):
@@ -1595,6 +1807,7 @@ def main():
     app.add_handler(CommandHandler("users", users_list_cmd))
     app.add_handler(CommandHandler("limit", limit_cmd))
     app.add_handler(CommandHandler("deluser", deluser_cmd))
+    app.add_handler(CommandHandler("requests", requests_cmd))
     app.add_handler(CommandHandler("givemepowers", givemepowers_cmd))
     app.add_handler(CommandHandler("ban", ban_cmd))
     app.add_handler(CommandHandler("unban", unban_cmd))
