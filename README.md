@@ -12,7 +12,9 @@ Telegram bot for managing [wg-easy](https://github.com/wg-easy/wg-easy) WireGuar
 - 🔍 Search peers by name
 - Paginated inline keyboards (8 peers per page)
 - Works in both private chats (reply keyboard) and group threads (`/menu` inline keyboard)
-- Access restricted to a configurable list of Telegram usernames
+- Role-based access: admins manage all peers and users; regular users see and manage only their own peers, limited by a per-user config limit
+- Peer names follow the `<username>_<random hash>` pattern
+- Admins add users via `/adduser` (forward a message from the user or send their username, optionally with a limit), and manage them with `/users`, `/limit`, and `/deluser`
 
 ## Setup
 
@@ -29,7 +31,10 @@ WG_EASY_URL=https://your-wg-easy-instance.example.com
 WG_EASY_LOGIN=your-login
 WG_EASY_PASSWORD=your-password
 BOT_TOKEN=123456:ABC-your-bot-token
-ALLOWED_USERNAMES=alice,bob,charlie
+ADMIN_USERNAMES=admin1,admin2
+USERNAMES=alice,bob
+DEFAULT_CONFIG_LIMIT=3
+USERS_DB_PATH=users.db
 ```
 
 | Variable | Description |
@@ -38,7 +43,10 @@ ALLOWED_USERNAMES=alice,bob,charlie
 | `WG_EASY_LOGIN` | wg-easy username |
 | `WG_EASY_PASSWORD` | wg-easy password |
 | `BOT_TOKEN` | Telegram bot token from @BotFather |
-| `ALLOWED_USERNAMES` | Comma-separated Telegram usernames allowed to use the bot (without `@`) |
+| `ADMIN_USERNAMES` | Comma-separated Telegram usernames of admins (without `@`) |
+| `USERNAMES` | Comma-separated Telegram usernames of regular users bootstrap (without `@`) |
+| `DEFAULT_CONFIG_LIMIT` | Default per-user peer limit for newly added users (default `3`) |
+| `USERS_DB_PATH` | Path to the SQLite user database (default `users.db`) |
 
 ### 3. Run with Docker Compose
 
@@ -52,11 +60,15 @@ services:
     # build: .   # uncomment to build locally instead of pulling the image
     env_file: .env
     restart: unless-stopped
+    volumes:
+      - ./users.db:/app/users.db
 ```
 
 ```bash
 docker compose up -d
 ```
+
+The bot stores users in a SQLite database. Mount a volume to persist `users.db` across container restarts (as shown above).
 
 ## Usage
 
@@ -71,9 +83,17 @@ docker compose up -d
 |---|---|
 | `/start` | Show reply keyboard (private chat) |
 | `/menu` | Show inline keyboard (works everywhere) |
-| `/create <name>` | Create a new peer |
+| `/create` | Create a new peer; the name is auto-generated as `<username>_<hash>` (admin may pass `/create <username>` to create for another user) |
 | `/search <name>` | Search peers by name |
 | `/cancel` | Cancel current operation |
+| `/adduser` | Add a user — forward a message from them or send their username (admin only) |
+| `/users` | List users with role, limit, and Telegram ID (admin only) |
+| `/limit <username> <N>` | Set a user's peer limit; `-1` means unlimited (admin only) |
+| `/deluser <username>` | Remove a user (admin only) |
+
+### User management
+
+Admins add users with `/adduser` by either forwarding a message from the user or sending their username as text (optionally followed by a limit, e.g. `alice 5`). Users are stored in SQLite together with their Telegram ID and username. A user added by username only becomes bound to their Telegram ID on their first message to the bot.
 
 ### Config file
 
