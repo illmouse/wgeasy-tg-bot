@@ -32,9 +32,13 @@ class WGEasyAPI:
         else:
             resp.raise_for_status()
         # Strip the Secure flag so cookies are sent over plain HTTP too
-        # (needed when connecting directly to wg-easy inside Docker without TLS)
+        # (needed when connecting directly to wg-easy inside Docker without TLS).
+        # The cookie domain is cleared as well: custom builds may set a
+        # Domain that does not match the host we actually talk to.
         for cookie in self.session.cookies:
             cookie.secure = False
+            cookie.domain = ""
+            cookie.domain_specified = False
         self._authenticated = True
 
     def _request(self, method, path, **kwargs):
@@ -50,7 +54,21 @@ class WGEasyAPI:
         return resp
 
     def list_clients(self):
-        return self._request("GET", "/api/client").json()
+        clients = []
+        page = 1
+        while page <= 50:
+            data = self._request("GET", f"/api/client?page={page}&pageSize=100").json()
+            if isinstance(data, list):
+                return clients + data if page > 1 else data
+            batch = data.get("clients") if isinstance(data, dict) else None
+            if not isinstance(batch, list):
+                raise ValueError(f"Unexpected /api/client response: {type(data).__name__}")
+            clients.extend(batch)
+            total = data.get("total")
+            if not batch or len(batch) < 100 or (isinstance(total, int) and len(clients) >= total):
+                break
+            page += 1
+        return clients
 
     def create_client(self, name: str):
         return self._request("POST", "/api/client", json={"name": name, "expiresAt": None}).json()

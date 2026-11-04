@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.1] - 2026-11-04
+
+### Fixed
+
+- wg-easy master compatibility: `GET /api/client` now returns a paginated envelope (`clients`, `total`, `page`, `pageSize`) instead of a flat list — the peer list is unwrapped and all pages fetched (backward compatible with the flat list of older versions).
+- Login cookie hardening: the session cookie's `Secure` flag and `Domain` attribute are now both stripped, so authentication keeps working over plain HTTP and when the server sets a cookie domain that does not match the host the bot talks to (custom wg-easy builds).
+
 ## [1.0.0] - 2026-11-04
 
 Stable release. Rolls up all changes shipped in the `0.2.x` beta line (`0.2.0b`–`0.2.4b`) since `0.1.0`.
