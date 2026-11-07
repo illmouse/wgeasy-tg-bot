@@ -67,6 +67,7 @@ class UserDB:
             "ALTER TABLE users ADD COLUMN banned_until TEXT",
             "ALTER TABLE requests ADD COLUMN type TEXT NOT NULL DEFAULT 'access'",
             "ALTER TABLE requests ADD COLUMN requested_limit INTEGER",
+            "ALTER TABLE requests ADD COLUMN notification_refs TEXT NOT NULL DEFAULT '[]'",
         ):
             try:
                 cur.execute(statement)
@@ -232,6 +233,11 @@ class UserDB:
         self.conn.commit()
         return cur.lastrowid
 
+    def set_request_notifications(self, req_id: int, refs: list[tuple[int, int]]) -> None:
+        import json
+        self.conn.execute("UPDATE requests SET notification_refs = ? WHERE id = ?", (json.dumps(refs), req_id))
+        self.conn.commit()
+
     def _row_to_request(self, row: sqlite3.Row) -> dict:
         return {
             "id": row["id"],
@@ -246,6 +252,7 @@ class UserDB:
             "decided_at": row["decided_at"],
             "type": row["type"],
             "requested_limit": row["requested_limit"],
+            "notification_refs": row["notification_refs"] if "notification_refs" in row.keys() else "[]",
         }
 
     def get_request(self, req_id: int) -> dict | None:
@@ -275,6 +282,7 @@ class UserDB:
         limit: int = 20,
         tg_id: int | None = None,
         username: str | None = None,
+        offset: int = 0,
     ) -> list[dict]:
         uname = str(username).strip().lstrip("@").lower() if username is not None else None
         if uname == "":
@@ -293,7 +301,7 @@ class UserDB:
             where = ""
             params = ()
         cur = self.conn.cursor()
-        cur.execute(base + where + " ORDER BY id DESC LIMIT ?", params + (limit,))
+        cur.execute(base + where + " ORDER BY id DESC LIMIT ? OFFSET ?", params + (limit, offset))
         return [self._row_to_request(r) for r in cur.fetchall()]
 
     def get_user(self, username: str) -> User | None:
@@ -338,6 +346,29 @@ class UserDB:
             "AND tg_id != -1 ORDER BY username"
         )
         return [self._row_to_user(r) for r in cur.fetchall()]
+
+    def set_role(self, username: str, role: str) -> User:
+        if role not in ("admin", "user"):
+            raise ValueError("invalid role")
+        uname = str(username).strip().lstrip("@").lower()
+        cur = self.conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute("SELECT role FROM users WHERE username = ?", (uname,))
+        existing = cur.fetchone()
+        if existing is None:
+            self.conn.rollback()
+            raise KeyError(username)
+        if existing["role"] == "admin" and role != "admin":
+            cur.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'")
+            if cur.fetchone()[0] <= 1:
+                self.conn.rollback()
+                raise ValueError("cannot demote the last admin")
+        cur.execute("UPDATE users SET role = ? WHERE username = ?", (role, uname))
+        self.conn.commit()
+        return self.get_user(uname)
+
+    def request_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
 
     def is_banned(self, user: User) -> bool:
         return user.status == "banned"

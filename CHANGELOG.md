@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.0b] - 2026-11-07
+
+### Added
+
+- Admins can promote users to admins and demote admins to users; the last admin is protected from demotion.
+- Admins may create peers for themselves without a configured per-user limit.
+- Peer owner names are visible in admin peer lists and peer details.
+- Access and limit request notifications are sent to all admins who have started the bot, and every admin notification is updated when a request is decided.
+- Request history is paginated, and admin peer tables use Telegram's native rich-table API when available with a readable text fallback.
+
+### Changed
+
+- Bot menu labels now use clearer plain-language terms such as “Configurations”, “Online devices”, “Add a device”, and “Download configuration”.
+- Admin peer creation now asks who the peer is for before offering name selection; admins can choose themselves or another registered user.
+- Automatically generated peer names are derived from the wg-easy client ID hash; peers can be renamed from their details view.
+- Admin peer lists show the owning user, and peer details identify the owner.
+
 ## [1.0.1] - 2026-11-04
 
 ### Fixed
