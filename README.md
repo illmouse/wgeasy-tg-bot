@@ -4,15 +4,14 @@ Telegram bot for managing [wg-easy](https://github.com/wg-easy/wg-easy) WireGuar
 
 ## Features
 
-- 📋 List all peers with status and IP
-- 🟢 Show only active peers (handshake within last 3 minutes)
+- 📋 Browse devices in one paginated list with All, Active, Enabled and Disabled filters; Active means a handshake within the last 3 minutes
+- Device rows show relative and absolute last-handshake times; admins also see the owner
+- Device details provide configuration download and rename, plus admin management actions, with back navigation to the source list
 - ➕ Create new peer — sends the `.conf` file immediately upon creation
-- 📥 Download config for any existing peer
 - 🗑 Delete peer with confirmation step
-- 🔍 Search peers by name
-- Paginated inline keyboards (8 peers per page)
+- Paginated inline keyboards (8 devices per page)
 - Works in both private chats (reply keyboard) and group threads (`/menu` inline keyboard)
-- Clearer menu labels: “Configurations”, “Online devices”, “Add a device”, “Download configuration”, and “Remove a device”
+- The main menu opens Devices; the separate Online devices and download entries are removed, and Search is no longer in the menu
 - Role-based access: admins manage all peers and users; regular users see and manage only their own peers, limited by a per-user config limit
 - Admins can create peers for themselves without a per-user limit, or create for another registered user; normal users create peers for themselves
 - Peer names are short hashes derived from wg-easy client IDs; admins can see peer owners, and peers can be renamed in peer details (names must fit the 15-character AmneziaWG tunnel-name limit)
@@ -93,7 +92,6 @@ The bot stores users in a SQLite database. Mount a volume to persist `users.db` 
 | `/start` | Show reply keyboard (private chat) |
 | `/menu` | Show inline keyboard (works everywhere) |
 | `/create` | Create a new peer: regular users create for themselves; admins choose themselves or another registered user before selecting a generated or custom name. Admins can also use `/create <username>` (max 15 chars, AmneziaWG limit) |
-| `/search <name>` | Search peers by name |
 | `/cancel` | Cancel current operation |
 | `/adduser` | Add a user — forward a message from them or send their username (admin only) |
 | `/users` | Interactive user list: tap a user to open their card (delete/limit/ban/role/requests actions), then `Peers` opens the peers card — one full-width row per peer — and a peer's name opens its details card with config/rename/toggle/delete actions (admin only; last admin cannot be demoted) |

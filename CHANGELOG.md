@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.1b] - 2026-11-07
+
+### Added
+
+- Registration approval notifications now include an “Open menu” button and instructions to use `/start`.
+
+### Changed
+
+- Replaced the Configurations main-menu entry with Devices, combining All, Active, Enabled and Disabled filters in one paginated list. Active means a handshake within the last 3 minutes; device rows show relative and absolute last-handshake times, and admins see the owner.
+- Device details now provide download, rename and (for admins) management actions, with a back action returning to the originating list. Removed the separate Online devices and download menu entries, and retired Search from the menu.
+- Reordered admin user-detail actions into Peers, Limit/Requests, Delete/Disable, Promote/Demote, and Back/Close groups.
+
 ## [1.1.0b] - 2026-11-07
 
 ### Added
