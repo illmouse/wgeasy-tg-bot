@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.3b] - 2026-11-07
+
+### Added
+
+- Admin request history now shows a table with request details, status and page navigation. The **Pending** filter switches to an actionable list with Approve and Decline controls; decisions refresh the pending list.
+- Limit-change requests show the current and requested limits (for example, `3 → 5`).
+
 ## [1.1.2b] - 2026-11-07
 
 ### Added

@@ -329,11 +329,32 @@ def _format_request_line(r):
         who = f"id {r['tg_id']}"
     line = f"#{r['id']} {status_icon} {type_icon} {who}"
     if r.get("type") == "limit" and r.get("requested_limit") is not None:
-        line += f" → {r['requested_limit']}"
+        previous = _display_limit(r.get("previous_limit"))
+        requested = _display_limit(r.get("requested_limit"))
+        line += f" · {previous} → {requested}"
     line += f" · {_dt_short(r.get('requested_at'), with_time=True)}"
     if r.get("status") != "pending" and r.get("admin_username"):
         line += f" · by @{r['admin_username']}"
     return line
+
+
+def _display_limit(limit):
+    if limit is None:
+        return "—"
+    return "∞" if limit == -1 else str(limit)
+
+
+def _request_action_label(r):
+    if r.get("username"):
+        who = "@" + r["username"]
+    elif r.get("first_name") or r.get("last_name"):
+        who = f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip()
+    else:
+        who = str(r["tg_id"])
+    label = f"#{r['id']} {'📈' if r.get('type') == 'limit' else '🔑'} {who}"
+    if r.get("type") == "limit":
+        label += f" {_display_limit(r.get('previous_limit'))} → {_display_limit(r.get('requested_limit'))}"
+    return label[:60]
 
 
 def _request_history_view(page=0):
@@ -349,15 +370,12 @@ def _filtered_request_history_view(page=0, status_filter="all", page_size=10):
     page = max(0, min(page, total_pages - 1))
     reqs = users_db.list_requests(page_size, offset=page * page_size, status=status)
     rows = []
-    for r in reqs:
-        rows.append([InlineKeyboardButton(
-            f"{r['id']} · {r['status']} · {r.get('username') or r['tg_id']}",
-            callback_data="noop",
-        )])
-        if r["status"] == "pending":
+    if status_filter == "pending":
+        for r in reqs:
             rows.append([
-                InlineKeyboardButton("✅ Approve", callback_data=f"req:approve:{r['id']}"),
-                InlineKeyboardButton("❌ Decline", callback_data=f"req:decline:{r['id']}"),
+                InlineKeyboardButton(_request_action_label(r), callback_data="noop"),
+                InlineKeyboardButton("✅ Approve", callback_data=f"reqhist:approve:{r['id']}:{page}"),
+                InlineKeyboardButton("❌ Decline", callback_data=f"reqhist:decline:{r['id']}:{page}"),
             ])
     rows.insert(0, [
         InlineKeyboardButton(f"All ({users_db.request_count()})", callback_data="reqview:all:0"),
@@ -365,24 +383,123 @@ def _filtered_request_history_view(page=0, status_filter="all", page_size=10):
     ])
     nav = []
     if page:
-        nav.append(InlineKeyboardButton("◀", callback_data=f"reqview:{status_filter}:{page - 1}"))
+        nav.append(InlineKeyboardButton("◀ Previous page", callback_data=f"reqview:{status_filter}:{page - 1}"))
     if total_pages > 1:
         nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
     if page + 1 < total_pages:
-        nav.append(InlineKeyboardButton("▶", callback_data=f"reqview:{status_filter}:{page + 1}"))
+        nav.append(InlineKeyboardButton("Next page ▶", callback_data=f"reqview:{status_filter}:{page + 1}"))
     if nav:
         rows.append(nav)
-    rows.append([InlineKeyboardButton("❌ Close", callback_data="cancel")])
-    title = "Pending requests" if status_filter == "pending" else "Request history"
-    text = f"📜 {title} · {pending_total} pending" + (f" ({page * page_size + 1}–{min((page + 1) * page_size, total)} of {total})" if total else " (empty)")
-    text += "\n" + "\n".join(_format_request_line(r) for r in reqs)
+    rows.append([InlineKeyboardButton("Close", callback_data="reqclose")])
+    title = f"📜 Pending ({pending_total})" if status_filter == "pending" else f"📜 Request history · Pending ({pending_total})"
+    text = title
+    if status_filter == "pending" and not reqs:
+        text += "\nNo pending requests."
+    elif status_filter == "all" and not total:
+        text += "\nNo requests yet."
     return text, InlineKeyboardMarkup(rows)
 
 
 def _request_table_rows(page=0, status_filter="all"):
     status = None if status_filter == "all" else status_filter
     reqs = users_db.list_requests(10, offset=max(0, page) * 10, status=status)
-    return [[f"#{r['id']}", r.get("username") or str(r["tg_id"]), r.get("type", "access"), r["status"], _dt_short(r.get("requested_at"), True)] for r in reqs]
+    return [
+        [
+            f"#{r['id']}",
+            r.get("username") or str(r["tg_id"]),
+            "Limit change" if r.get("type") == "limit" else "Access",
+            f"{_display_limit(r.get('previous_limit'))} → {_display_limit(r.get('requested_limit'))}" if r.get("type") == "limit" else "—",
+            r["status"],
+            _dt_short(r.get("requested_at"), True),
+        ]
+        for r in reqs
+    ]
+
+
+async def _send_request_history_table(bot, chat_id, page=0, status_filter="all"):
+    if status_filter != "all":
+        return
+    reqs = users_db.list_requests(10, offset=max(0, page) * 10)
+    if not reqs:
+        return
+    pending_total = users_db.request_count("pending")
+    table_title = f"Request history · Pending ({pending_total})"
+    headers = ["ID", "User", "Request", "Limit change", "Status", "Requested"]
+    rows = _request_table_rows(page)
+    fallback = "\n".join(" | ".join(str(cell) for cell in row) for row in rows)
+    await _send_table_or_text(bot, chat_id, table_title, headers, rows, fallback)
+
+
+def _request_history_rich_message(page=0, status_filter="all", page_size=10):
+    status = None if status_filter == "all" else status_filter
+    total = users_db.request_count(status)
+    pending_total = users_db.request_count("pending")
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    reqs = users_db.list_requests(page_size, offset=page * page_size, status=status)
+    blocks = [{
+        "type": "paragraph",
+        "text": f"📜 Request history · Pending ({pending_total})" if status_filter == "all" else f"📜 Pending ({pending_total})",
+    }]
+
+    if status_filter == "all" and reqs:
+        rows = _request_table_rows(page)
+        cells = [[{"text": header, "is_header": True} for header in ("ID", "User", "Request", "Limit change", "Status", "Requested")]]
+        cells.extend([[{"text": str(value)} for value in row] for row in rows])
+        blocks.append({"type": "table", "is_bordered": True, "is_striped": True, "cells": cells})
+    elif status_filter == "pending" and reqs:
+        for req in reqs:
+            blocks.append({
+                "type": "buttons",
+                "buttons": [
+                    {"text": _request_action_label(req), "callback_data": "noop"},
+                    {"text": "✅ Approve", "style": "success", "callback_data": f"reqhist:approve:{req['id']}:{page}"},
+                    {"text": "❌ Decline", "style": "danger", "callback_data": f"reqhist:decline:{req['id']}:{page}"},
+                ],
+            })
+    else:
+        blocks.append({"type": "paragraph", "text": "No requests yet." if status_filter == "all" else "No pending requests."})
+
+    blocks.append({
+        "type": "buttons",
+        "buttons": [
+            {"text": f"All ({users_db.request_count()})", "callback_data": "reqview:all:0"},
+            {"text": f"Pending ({pending_total})", "callback_data": "reqview:pending:0"},
+        ],
+    })
+    nav_buttons = []
+    if page:
+        nav_buttons.append({"text": "◀ Previous page", "callback_data": f"reqview:{status_filter}:{page - 1}"})
+    nav_buttons.append({"text": f"{page + 1}/{total_pages}", "callback_data": "noop"})
+    if page + 1 < total_pages:
+        nav_buttons.append({"text": "Next page ▶", "callback_data": f"reqview:{status_filter}:{page + 1}"})
+    blocks.append({"type": "buttons", "buttons": nav_buttons})
+    blocks.append({"type": "buttons", "buttons": [{"text": "Close", "callback_data": "reqclose"}]})
+    return {"blocks": blocks}, page
+
+
+async def _show_request_history(bot, chat_id, page=0, status_filter="all", message_id=None):
+    rich, page = _request_history_rich_message(page, status_filter)
+    try:
+        if message_id is None:
+            await bot._post("sendRichMessage", data={"chat_id": chat_id, "rich_message": json.dumps(rich)})
+        else:
+            await bot._post("editMessageText", data={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "rich_message": json.dumps(rich),
+            })
+        return
+    except Exception as exc:
+        logger.info("Rich request history unavailable; using text view: %s", exc)
+
+    if status_filter == "all":
+        await _send_request_history_table(bot, chat_id, page, status_filter)
+    text, markup = _filtered_request_history_view(page, status_filter)
+    if message_id is None:
+        await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
+    else:
+        await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, parse_mode="HTML", reply_markup=markup)
 
 
 async def _edit_request_copies(context, req, text):
@@ -1031,6 +1148,7 @@ async def limitreq_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update.effective_user.last_name,
         req_type="limit",
         requested_limit=n,
+        previous_limit=user.config_limit,
     )
     refs = []
     for admin in admins:
@@ -1229,8 +1347,7 @@ async def users_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @require_admin
 async def requests_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text, markup = _filtered_request_history_view()
-    await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+    await _show_request_history(context.bot, update.effective_chat.id)
 
 
 @require_admin
@@ -1323,6 +1440,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['_user'] = user
 
     data = query.data
+    history_action = False
+    history_page = 0
+    if data.startswith("reqhist:"):
+        history_parts = data.split(":")
+        if len(history_parts) != 4 or history_parts[1] not in {"approve", "decline"}:
+            return
+        try:
+            history_page = int(history_parts[3])
+        except ValueError:
+            return
+        data = f"req:{history_parts[1]}:{history_parts[2]}"
+        history_action = True
 
     if data == "noop":
         return
@@ -1361,22 +1490,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             page = int(page_text)
         except ValueError:
             return
-        text, markup = _filtered_request_history_view(page, status_filter)
-        status = None if status_filter == "all" else status_filter
-        total = users_db.request_count(status)
-        if total:
-            reqs = users_db.list_requests(10, offset=page * 10, status=status)
-            table_title = "Request history" if status_filter == "all" else "Pending requests"
-            _fallback = "\n".join(_format_request_line(r) for r in reqs)
-            await _send_table_or_text(
-                context.bot,
-                query.message.chat_id,
-                table_title,
-                ["ID", "User", "Type", "Status", "Requested"],
-                _request_table_rows(page, status_filter),
-                _fallback,
-            )
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        await _show_request_history(
+            context.bot,
+            query.message.chat_id,
+            page,
+            status_filter,
+            message_id=query.message.message_id,
+        )
+        return
+
+    if data == "reqclose":
+        if not users_db.is_admin(user):
+            await query.edit_message_text("Admins only.")
+            return
+        try:
+            await query.message.delete()
+        except Exception:
+            await query.edit_message_text("Request history closed.")
         return
 
     if data == "cancel":
@@ -1438,6 +1568,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if action not in ("approve", "decline"):
             return
+
+        async def finish_request_action(result_text):
+            if history_action:
+                await _show_request_history(
+                    context.bot,
+                    query.message.chat_id,
+                    history_page,
+                    "pending",
+                    message_id=query.message.message_id,
+                )
+            else:
+                await query.edit_message_text(result_text)
+
         decision = "approved" if action == "approve" else "declined"
         if not users_db.decide_request(req_id, decision, user.tg_id, user.username):
             await query.edit_message_text("Request already processed.")
@@ -1463,7 +1606,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception:
                     logger.warning("Failed to notify user %s about limit approval", req["tg_id"])
-                await query.edit_message_text(
+                await finish_request_action(
                     f"✅ Request #{req_id} approved: @{req['username']} limit → {req['requested_limit']}"
                 )
                 return
@@ -1477,7 +1620,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception:
                     logger.warning("Failed to notify user %s about limit decline", req["tg_id"])
-                await query.edit_message_text(f"❌ Request #{req_id} declined.")
+                await finish_request_action(f"❌ Request #{req_id} declined.")
                 return
         if action == "approve":
             uname = req["username"] or f"user{req['tg_id']}"
@@ -1499,7 +1642,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             except Exception:
                 logger.warning("Failed to notify user %s about approval", req["tg_id"])
-            await query.edit_message_text(f"✅ Request #{req_id} approved: {created.username} registered.")
+            await finish_request_action(f"✅ Request #{req_id} approved: {created.username} registered.")
             return
         if action == "decline":
             users_db.decide_request(req_id, "declined", user.tg_id, user.username)
@@ -1511,7 +1654,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             except Exception:
                 logger.warning("Failed to notify user %s about decline", req["tg_id"])
-            await query.edit_message_text(f"❌ Request #{req_id} declined.")
+            await finish_request_action(f"❌ Request #{req_id} declined.")
             return
         return
 
@@ -1766,11 +1909,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not users_db.is_admin(user):
                 await query.edit_message_text("Admins only.")
                 return
-            text, markup = _filtered_request_history_view()
-            if users_db.request_count():
-                reqs = users_db.list_requests(10)
-                await _send_table_or_text(context.bot, query.message.chat_id, "Request history", ["ID", "User", "Type", "Status", "Requested"], _request_table_rows(), "\n".join(_format_request_line(r) for r in reqs))
-            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+            await _show_request_history(
+                context.bot,
+                query.message.chat_id,
+                message_id=query.message.message_id,
+            )
             return
 
         elif action == "delete":

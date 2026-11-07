@@ -67,6 +67,7 @@ class UserDB:
             "ALTER TABLE users ADD COLUMN banned_until TEXT",
             "ALTER TABLE requests ADD COLUMN type TEXT NOT NULL DEFAULT 'access'",
             "ALTER TABLE requests ADD COLUMN requested_limit INTEGER",
+            "ALTER TABLE requests ADD COLUMN previous_limit INTEGER",
             "ALTER TABLE requests ADD COLUMN notification_refs TEXT NOT NULL DEFAULT '[]'",
         ):
             try:
@@ -218,6 +219,7 @@ class UserDB:
         last_name: str | None,
         req_type: str = "access",
         requested_limit: int | None = None,
+        previous_limit: int | None = None,
     ) -> int:
         uname = None
         if username is not None:
@@ -226,9 +228,9 @@ class UserDB:
                 uname = None
         cur = self.conn.cursor()
         cur.execute(
-            "INSERT INTO requests (tg_id, username, first_name, last_name, type, requested_limit) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (tg_id, uname, first_name, last_name, req_type, requested_limit),
+            "INSERT INTO requests (tg_id, username, first_name, last_name, type, requested_limit, previous_limit) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (tg_id, uname, first_name, last_name, req_type, requested_limit, previous_limit),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -252,6 +254,7 @@ class UserDB:
             "decided_at": row["decided_at"],
             "type": row["type"],
             "requested_limit": row["requested_limit"],
+            "previous_limit": row["previous_limit"] if "previous_limit" in row.keys() else None,
             "notification_refs": row["notification_refs"] if "notification_refs" in row.keys() else "[]",
         }
 

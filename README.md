@@ -107,7 +107,7 @@ In `/users`, admins can open a user’s details to review their devices and requ
 
 #### Limits and request history
 
-Admins can set a device limit with `/limit`; `-1` means unlimited. Registered users can use **Increase device limit** to request a change, which admins can approve or decline. Admins can browse **All** or **Pending** requests with `/requests` or **Requests**, and act on pending requests from the list. User details show that user’s history, and registered users can view their own requests with `/givemepowers`.
+Admins can set a device limit with `/limit`; `-1` means unlimited. Registered users can use **Increase device limit** to request a change, which admins can approve or decline. Admins can browse **All** or **Pending** requests with `/requests` or **Requests**. All shows a paginated request table; Pending switches to an actionable list, and limit requests show the current and requested values. User details show that user’s history, and registered users can view their own requests with `/givemepowers`.
 
 ### Config file
 
