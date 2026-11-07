@@ -219,7 +219,6 @@ class UserDB:
         last_name: str | None,
         req_type: str = "access",
         requested_limit: int | None = None,
-        previous_limit: int | None = None,
     ) -> int:
         uname = None
         if username is not None:
@@ -227,6 +226,20 @@ class UserDB:
             if not uname:
                 uname = None
         cur = self.conn.cursor()
+        if req_type == "limit":
+            if tg_id is not None:
+                cur.execute("SELECT config_limit FROM users WHERE tg_id = ?", (tg_id,))
+                user_row = cur.fetchone()
+            else:
+                user_row = None
+            if user_row is None and uname is not None:
+                cur.execute("SELECT config_limit FROM users WHERE username = ?", (uname,))
+                user_row = cur.fetchone()
+            if user_row is None:
+                raise ValueError("Cannot create a limit request for an unknown user")
+            previous_limit = int(user_row["config_limit"])
+        else:
+            previous_limit = None
         cur.execute(
             "INSERT INTO requests (tg_id, username, first_name, last_name, type, requested_limit, previous_limit) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",

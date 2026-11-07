@@ -70,18 +70,16 @@ PEER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,15}$")
 
 ADMIN_KEYBOARD = ReplyKeyboardMarkup(
     [
-        ["📋 Devices"],
-        ["➕ Add a device", "🗑 Remove a device"],
-        ["👥 Users", "➕ Add User"],
         ["📜 Requests"],
+        ["📋 Devices", "👥 Users"],
+        ["➕ Add a device", "➕ Add User"],
     ],
     resize_keyboard=True,
 )
 
 USER_KEYBOARD = ReplyKeyboardMarkup(
     [
-        ["📋 Devices"],
-        ["➕ Add a device", "🗑 Remove a device"],
+        ["📋 Devices", "➕ Add a device"],
         ["📈 Increase device limit"],
     ],
     resize_keyboard=True,
@@ -99,10 +97,7 @@ PEER_SELECT_TITLE = {
 INLINE_MENU_USER = InlineKeyboardMarkup([
     [
         InlineKeyboardButton("📋 Devices", callback_data="menu:list"),
-    ],
-    [
         InlineKeyboardButton("➕ Add a device", callback_data="menu:create"),
-        InlineKeyboardButton("🗑 Remove a device", callback_data="menu:delete"),
     ],
     [
         InlineKeyboardButton("📈 Increase device limit", callback_data="menu:limitreq"),
@@ -116,16 +111,15 @@ def _inline_menu_markup(user):
     pending = users_db.request_count("pending")
     requests_label = "📜 Requests" + (f" · {pending} pending" if pending else "")
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Devices", callback_data="menu:list")],
+        [InlineKeyboardButton(requests_label, callback_data="menu:requests")],
+        [
+            InlineKeyboardButton("📋 Devices", callback_data="menu:list"),
+            InlineKeyboardButton("👥 Users", callback_data="menu:users"),
+        ],
         [
             InlineKeyboardButton("➕ Add a device", callback_data="menu:create"),
-            InlineKeyboardButton("🗑 Remove a device", callback_data="menu:delete"),
-        ],
-        [
-            InlineKeyboardButton("👥 Users", callback_data="menu:users"),
             InlineKeyboardButton("➕ Add User", callback_data="menu:adduser"),
         ],
-        [InlineKeyboardButton(requests_label, callback_data="menu:requests")],
     ])
 
 CREATE_MENU = InlineKeyboardMarkup([
@@ -377,10 +371,12 @@ def _filtered_request_history_view(page=0, status_filter="all", page_size=10):
                 InlineKeyboardButton("✅ Approve", callback_data=f"reqhist:approve:{r['id']}:{page}"),
                 InlineKeyboardButton("❌ Decline", callback_data=f"reqhist:decline:{r['id']}:{page}"),
             ])
-    rows.insert(0, [
-        InlineKeyboardButton(f"All ({users_db.request_count()})", callback_data="reqview:all:0"),
-        InlineKeyboardButton(f"Pending ({pending_total})", callback_data="reqview:pending:0"),
-    ])
+    filter_buttons = []
+    if status_filter == "pending":
+        filter_buttons.append(InlineKeyboardButton(f"All ({users_db.request_count()})", callback_data="reqview:all:0"))
+    else:
+        filter_buttons.append(InlineKeyboardButton(f"Pending ({pending_total})", callback_data="reqview:pending:0"))
+    rows.insert(0, filter_buttons)
     nav = []
     if page:
         nav.append(InlineKeyboardButton("◀ Previous page", callback_data=f"reqview:{status_filter}:{page - 1}"))
@@ -460,13 +456,12 @@ def _request_history_rich_message(page=0, status_filter="all", page_size=10):
     else:
         blocks.append({"type": "paragraph", "text": "No requests yet." if status_filter == "all" else "No pending requests."})
 
-    blocks.append({
-        "type": "buttons",
-        "buttons": [
-            {"text": f"All ({users_db.request_count()})", "callback_data": "reqview:all:0"},
-            {"text": f"Pending ({pending_total})", "callback_data": "reqview:pending:0"},
-        ],
-    })
+    filter_buttons = []
+    if status_filter == "pending":
+        filter_buttons.append({"text": f"All ({users_db.request_count()})", "callback_data": "reqview:all:0"})
+    else:
+        filter_buttons.append({"text": f"Pending ({pending_total})", "callback_data": "reqview:pending:0"})
+    blocks.append({"type": "buttons", "buttons": filter_buttons})
     nav_buttons = []
     if page:
         nav_buttons.append({"text": "◀ Previous page", "callback_data": f"reqview:{status_filter}:{page - 1}"})
@@ -621,16 +616,20 @@ async def _show_peer_selection(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
 
-def _users_list_view():
+def _users_list_view(page=0):
     users = users_db.list_users()
     if not users:
         return None
+    page_size = PAGE_SIZE
+    total_pages = max(1, (len(users) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
     try:
         live_names = {str(c.get("name", "")).lower() for c in wg.list_clients()}
     except Exception:
         live_names = None
     rows = []
-    for u in users:
+    start = page * page_size
+    for u in users[start:start + page_size]:
         peers = users_db.peers_of(u.username)
         if live_names is None:
             peer_count = len(peers)
@@ -640,12 +639,21 @@ def _users_list_view():
         label = f"{u.username} {peer_count}/{limit}"
         if u.status == "banned":
             label += " 🔒"
-        rows.append([InlineKeyboardButton(label, callback_data=f"user:{u.username}")])
+        rows.append([InlineKeyboardButton(label, callback_data=f"user:{u.username}:{page}")])
+    nav = []
+    if page:
+        nav.append(InlineKeyboardButton("◀ Previous", callback_data=f"userspage:{page - 1}"))
+    if total_pages > 1:
+        nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
+    if page + 1 < total_pages:
+        nav.append(InlineKeyboardButton("Next ▶", callback_data=f"userspage:{page + 1}"))
+    if nav:
+        rows.append(nav)
     rows.append([InlineKeyboardButton("❌ Close", callback_data="cancel")])
-    return "👥 Registered users — tap to manage:", InlineKeyboardMarkup(rows)
+    return f"👥 Registered users ({len(users)}) · {page + 1}/{total_pages} — tap to manage:", InlineKeyboardMarkup(rows)
 
 
-def _user_detail_view(username):
+def _user_detail_view(username, back_target="menu:users"):
     u = users_db.get_user(username)
     if u is None:
         return None
@@ -678,7 +686,7 @@ def _user_detail_view(username):
         [InlineKeyboardButton("📝 Limit", callback_data=f"ulimit:{username}"), InlineKeyboardButton("📜 Requests", callback_data=f"ureqs:{username}")],
         [InlineKeyboardButton("🗑 Delete", callback_data=f"udel:{username}"), InlineKeyboardButton("🔓 Enable" if u.status == "banned" else "⛔ Disable", callback_data=f"unban:{username}" if u.status == "banned" else f"uban:{username}")],
         [InlineKeyboardButton(role_label, callback_data=f"role:{username}")],
-        _back_close_row("menu:users"),
+        _back_close_row(back_target),
     ]
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
@@ -950,11 +958,6 @@ def _is_active(client):
         return False
 
 
-@require_access
-async def delete_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await _show_peer_selection(update, context, "del")
-
-
 # ── Create peer ────────────────────────────────────────────────────────────────
 
 @require_access
@@ -1120,6 +1123,7 @@ async def limitreq_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user is None:
         _log_unauthorized(update)
         return ConversationHandler.END
+    user = users_db.get_user(user.username) or user
     if users_db.is_banned(user):
         await update.message.reply_text("You are temporarily blocked. Contact an administrator.")
         return ConversationHandler.END
@@ -1148,7 +1152,6 @@ async def limitreq_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update.effective_user.last_name,
         req_type="limit",
         requested_limit=n,
-        previous_limit=user.config_limit,
     )
     refs = []
     for admin in admins:
@@ -1768,12 +1771,37 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
         return
 
+    if data.startswith("userspage:"):
+        if not users_db.is_admin(user):
+            await query.edit_message_text("Admins only.")
+            return
+        try:
+            page = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        view = _users_list_view(page)
+        if view is None:
+            await query.edit_message_text("No registered users.")
+            return
+        text, kb = view
+        await query.edit_message_text(text, reply_markup=kb)
+        return
+
     if data.startswith("user:"):
         if not users_db.is_admin(user):
             await query.edit_message_text("Admins only.")
             return
-        username = data.split(":", 1)[1]
-        view = _user_detail_view(username)
+        parts = data.split(":")
+        if len(parts) not in (2, 3):
+            return
+        username = parts[1]
+        back_target = "menu:users"
+        if len(parts) == 3:
+            try:
+                back_target = f"userspage:{int(parts[2])}"
+            except ValueError:
+                return
+        view = _user_detail_view(username, back_target=back_target)
         if view is None:
             await query.edit_message_text("User not found.")
             return
@@ -1916,19 +1944,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        elif action == "delete":
-            try:
-                clients = wg.list_clients()
-            except Exception as e:
-                await query.message.reply_text(f"API error: {e}")
-                return
-            clients = visible_clients(user, clients)
-            if not clients:
-                await query.message.reply_text("No peers found.")
-                return
-            act = "del"
-            context.user_data[f"{act}_filter"] = ""
-            await query.edit_message_text(PEER_SELECT_TITLE[act], reply_markup=peers_keyboard(clients, act))
         return
 
     if data.startswith("dev:"):
@@ -2061,8 +2076,8 @@ def main():
     token = os.environ["BOT_TOKEN"]
     app = Application.builder().token(token).build()
 
-    kb_buttons_admin = ["📋 Devices", "➕ Add a device", "🗑 Remove a device", "👥 Users", "➕ Add User", "📜 Requests"]
-    kb_buttons_user = ["📋 Devices", "➕ Add a device", "🗑 Remove a device", "📈 Increase device limit"]
+    kb_buttons_admin = ["📋 Devices", "➕ Add a device", "👥 Users", "➕ Add User", "📜 Requests"]
+    kb_buttons_user = ["📋 Devices", "➕ Add a device", "📈 Increase device limit"]
     kb_filter = filters.Text(kb_buttons_admin + kb_buttons_user)
     cancel_cb = CallbackQueryHandler(cancel_from_button, pattern="^cancel_conv$")
 
@@ -2115,7 +2130,6 @@ def main():
     app.add_handler(CommandHandler("menu", menu))
     app.add_handler(conv_handler)
     app.add_handler(MessageHandler(filters.Text(["📋 Devices"]), list_peers))
-    app.add_handler(MessageHandler(filters.Text(["🗑 Remove a device"]), delete_menu))
     app.add_handler(MessageHandler(filters.Text(["👥 Users"]), users_list_cmd))
     app.add_handler(MessageHandler(filters.Text(["📜 Requests"]), requests_cmd))
     app.add_handler(CommandHandler("users", users_list_cmd))

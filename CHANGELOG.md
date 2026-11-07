@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.4b] - 2026-11-07
+
+### Added
+
+- Admins can browse the user list page by page, and returning from user details restores the current page.
+
+### Changed
+
+- Limit-change requests now record and display the current limit from the database.
+- Request-history filters are contextual: the All view offers Pending, and the Pending view offers All.
+- Reorganized admin and user menus and removed the standalone remove-device menu entry; device removal remains available from device details.
+
 ## [1.1.3b] - 2026-11-07
 
 ### Added

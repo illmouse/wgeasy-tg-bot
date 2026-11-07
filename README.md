@@ -72,7 +72,7 @@ The bot stores users in a SQLite database. Mount a volume to persist `users.db` 
 
 The main menu opens **Devices**. Browse the paginated list using the **All**, **Active**, **Enabled**, and **Disabled** filters. **Active** means a handshake within the last 3 minutes. Your current device usage and limit are shown in the list.
 
-Open a device for its details and configuration download. Users can rename their own devices; admins can rename any device and also manage device status and removal. Regular users have a separate **Remove a device** menu for deleting their devices.
+Open a device for its details and configuration download. Users can rename or remove their own devices from the device details; admins can rename any device and also manage device status and removal.
 
 Users create devices for themselves. Admins can create devices for themselves or another registered user, and may choose a custom name. Automatically generated names use an 8-character hash without a prefix. Device names can contain 1–15 letters, numbers, underscores, or hyphens. The bot sends the configuration file after creation.
 
@@ -103,7 +103,7 @@ Unregistered users can request access with `/givemepowers`. Admins who have star
 
 #### User and role controls
 
-In `/users`, admins can open a user’s details to review their devices and requests, change their limit, ban or unban them, delete them, or promote/demote their role. The last admin cannot be demoted. `/ban` blocks the user and disables their devices; `/unban` restores access and re-enables them. Deleting a user also deletes their devices from wg-easy.
+In `/users`, admins can browse the paginated user list and open a user’s details to review their devices and requests, change their limit, ban or unban them, delete them, or promote/demote their role. The last admin cannot be demoted. `/ban` blocks the user and disables their devices; `/unban` restores access and re-enables them. Deleting a user also deletes their devices from wg-easy.
 
 #### Limits and request history
 
