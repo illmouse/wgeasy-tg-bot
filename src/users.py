@@ -283,25 +283,31 @@ class UserDB:
         tg_id: int | None = None,
         username: str | None = None,
         offset: int = 0,
+        status: str | None = None,
     ) -> list[dict]:
         uname = str(username).strip().lstrip("@").lower() if username is not None else None
         if uname == "":
             uname = None
         base = "SELECT * FROM requests "
+        conditions = []
+        params = []
         if tg_id is not None and uname is not None:
-            where = "WHERE (tg_id = ? OR username = ?)"
-            params = (tg_id, uname)
+            conditions.append("(tg_id = ? OR username = ?)")
+            params.extend((tg_id, uname))
         elif tg_id is not None:
-            where = "WHERE tg_id = ?"
-            params = (tg_id,)
+            conditions.append("tg_id = ?")
+            params.append(tg_id)
         elif uname is not None:
-            where = "WHERE username = ?"
-            params = (uname,)
-        else:
-            where = ""
-            params = ()
+            conditions.append("username = ?")
+            params.append(uname)
+        if status is not None:
+            if status not in ("pending", "approved", "declined"):
+                raise ValueError("invalid request status")
+            conditions.append("status = ?")
+            params.append(status)
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
         cur = self.conn.cursor()
-        cur.execute(base + where + " ORDER BY id DESC LIMIT ? OFFSET ?", params + (limit, offset))
+        cur.execute(base + where + " ORDER BY id DESC LIMIT ? OFFSET ?", tuple(params) + (limit, offset))
         return [self._row_to_request(r) for r in cur.fetchall()]
 
     def get_user(self, username: str) -> User | None:
@@ -367,8 +373,12 @@ class UserDB:
         self.conn.commit()
         return self.get_user(uname)
 
-    def request_count(self) -> int:
-        return self.conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
+    def request_count(self, status: str | None = None) -> int:
+        if status is None:
+            return self.conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
+        if status not in ("pending", "approved", "declined"):
+            raise ValueError("invalid request status")
+        return self.conn.execute("SELECT COUNT(*) FROM requests WHERE status = ?", (status,)).fetchone()[0]
 
     def is_banned(self, user: User) -> bool:
         return user.status == "banned"

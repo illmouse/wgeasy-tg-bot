@@ -73,6 +73,7 @@ ADMIN_KEYBOARD = ReplyKeyboardMarkup(
         ["📋 Devices"],
         ["➕ Add a device", "🗑 Remove a device"],
         ["👥 Users", "➕ Add User"],
+        ["📜 Requests"],
     ],
     resize_keyboard=True,
 )
@@ -81,7 +82,7 @@ USER_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["📋 Devices"],
         ["➕ Add a device", "🗑 Remove a device"],
-        ["📈 Request Limit"],
+        ["📈 Increase device limit"],
     ],
     resize_keyboard=True,
 )
@@ -95,21 +96,6 @@ PEER_SELECT_TITLE = {
     "del": "Select a device to remove:",
 }
 
-INLINE_MENU_ADMIN = InlineKeyboardMarkup([
-    [
-        InlineKeyboardButton("📋 Devices", callback_data="menu:list"),
-    ],
-    [
-        InlineKeyboardButton("➕ Add a device", callback_data="menu:create"),
-        InlineKeyboardButton("🗑 Remove a device", callback_data="menu:delete"),
-    ],
-    [
-        InlineKeyboardButton("👥 Users", callback_data="menu:users"),
-        InlineKeyboardButton("➕ Add User", callback_data="menu:adduser"),
-    ],
-    [InlineKeyboardButton("📜 Requests", callback_data="menu:requests")],
-])
-
 INLINE_MENU_USER = InlineKeyboardMarkup([
     [
         InlineKeyboardButton("📋 Devices", callback_data="menu:list"),
@@ -119,9 +105,28 @@ INLINE_MENU_USER = InlineKeyboardMarkup([
         InlineKeyboardButton("🗑 Remove a device", callback_data="menu:delete"),
     ],
     [
-        InlineKeyboardButton("📈 Request Limit", callback_data="menu:limitreq"),
+        InlineKeyboardButton("📈 Increase device limit", callback_data="menu:limitreq"),
     ],
 ])
+
+
+def _inline_menu_markup(user):
+    if not users_db.is_admin(user):
+        return INLINE_MENU_USER
+    pending = users_db.request_count("pending")
+    requests_label = "📜 Requests" + (f" · {pending} pending" if pending else "")
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Devices", callback_data="menu:list")],
+        [
+            InlineKeyboardButton("➕ Add a device", callback_data="menu:create"),
+            InlineKeyboardButton("🗑 Remove a device", callback_data="menu:delete"),
+        ],
+        [
+            InlineKeyboardButton("👥 Users", callback_data="menu:users"),
+            InlineKeyboardButton("➕ Add User", callback_data="menu:adduser"),
+        ],
+        [InlineKeyboardButton(requests_label, callback_data="menu:requests")],
+    ])
 
 CREATE_MENU = InlineKeyboardMarkup([
     [InlineKeyboardButton("🙋 For myself", callback_data="create:self")],
@@ -333,28 +338,50 @@ def _format_request_line(r):
 
 def _request_history_view(page=0):
     page_size = 10
-    total = users_db.request_count()
+    return _filtered_request_history_view(page, "all", page_size)
+
+
+def _filtered_request_history_view(page=0, status_filter="all", page_size=10):
+    status = None if status_filter == "all" else status_filter
+    total = users_db.request_count(status)
+    pending_total = users_db.request_count("pending")
     total_pages = max(1, (total + page_size - 1) // page_size)
     page = max(0, min(page, total_pages - 1))
-    reqs = users_db.list_requests(page_size, offset=page * page_size)
-    rows = [[InlineKeyboardButton(f"{r['id']} · {r['status']} · {r.get('username') or r['tg_id']}", callback_data="noop")] for r in reqs]
+    reqs = users_db.list_requests(page_size, offset=page * page_size, status=status)
+    rows = []
+    for r in reqs:
+        rows.append([InlineKeyboardButton(
+            f"{r['id']} · {r['status']} · {r.get('username') or r['tg_id']}",
+            callback_data="noop",
+        )])
+        if r["status"] == "pending":
+            rows.append([
+                InlineKeyboardButton("✅ Approve", callback_data=f"req:approve:{r['id']}"),
+                InlineKeyboardButton("❌ Decline", callback_data=f"req:decline:{r['id']}"),
+            ])
+    rows.insert(0, [
+        InlineKeyboardButton(f"All ({users_db.request_count()})", callback_data="reqview:all:0"),
+        InlineKeyboardButton(f"Pending ({pending_total})", callback_data="reqview:pending:0"),
+    ])
     nav = []
     if page:
-        nav.append(InlineKeyboardButton("◀", callback_data=f"reqpage:{page - 1}"))
+        nav.append(InlineKeyboardButton("◀", callback_data=f"reqview:{status_filter}:{page - 1}"))
     if total_pages > 1:
         nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
     if page + 1 < total_pages:
-        nav.append(InlineKeyboardButton("▶", callback_data=f"reqpage:{page + 1}"))
+        nav.append(InlineKeyboardButton("▶", callback_data=f"reqview:{status_filter}:{page + 1}"))
     if nav:
         rows.append(nav)
     rows.append([InlineKeyboardButton("❌ Close", callback_data="cancel")])
-    text = "📜 Request history" + (f" ({page * page_size + 1}–{min((page + 1) * page_size, total)} of {total})" if total else " (empty)")
+    title = "Pending requests" if status_filter == "pending" else "Request history"
+    text = f"📜 {title} · {pending_total} pending" + (f" ({page * page_size + 1}–{min((page + 1) * page_size, total)} of {total})" if total else " (empty)")
     text += "\n" + "\n".join(_format_request_line(r) for r in reqs)
     return text, InlineKeyboardMarkup(rows)
 
 
-def _request_table_rows(page=0):
-    reqs = users_db.list_requests(10, offset=max(0, page) * 10)
+def _request_table_rows(page=0, status_filter="all"):
+    status = None if status_filter == "all" else status_filter
+    reqs = users_db.list_requests(10, offset=max(0, page) * 10, status=status)
     return [[f"#{r['id']}", r.get("username") or str(r["tg_id"]), r.get("type", "access"), r["status"], _dt_short(r.get("requested_at"), True)] for r in reqs]
 
 
@@ -403,11 +430,13 @@ async def _create_peer_for(update: Update, target: str, custom_name, message=Non
     target_user = users_db.get_user(target)
     target_limit = target_user.config_limit if target_user is not None else -1
     if target_limit != -1 and len(active) >= target_limit and not (users_db.is_admin(get_user(update)) and target == get_user(update).username):
-        await message.reply_text(f"Limit reached: {len(active)}/{target_limit}. Delete a peer to free a slot.")
+        await message.reply_text(f"Device limit reached: {len(active)}/{target_limit}. Remove a device to make room.")
         return
     if custom_name is not None:
         if not PEER_NAME_RE.match(custom_name):
-            await message.reply_text("Invalid name: use 1-15 chars, letters/digits/_/- only.")
+            await message.reply_text(
+                f"Invalid device name. Use 1–{MAX_PEER_NAME_LEN} characters: letters, numbers, underscore (_) or hyphen (-)."
+            )
             return
         if custom_name.lower() in (live_names | db_names):
             await message.reply_text(
@@ -427,7 +456,7 @@ async def _create_peer_for(update: Update, target: str, custom_name, message=Non
     try:
         if client_id:
             import hashlib
-            hash_name = "wg-" + hashlib.sha256(str(client_id).encode()).hexdigest()[:8]
+            hash_name = hashlib.sha256(str(client_id).encode()).hexdigest()[:8]
             if hash_name.lower() not in (live_names | db_names):
                 try:
                     wg.rename_client(client_id, hash_name)
@@ -674,10 +703,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @require_access
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(update)
-    if user and users_db.is_admin(user):
-        await update.message.reply_text("WireGuard Manager", reply_markup=INLINE_MENU_ADMIN)
-    else:
-        await update.message.reply_text("WireGuard Manager", reply_markup=INLINE_MENU_USER)
+    await update.message.reply_text("WireGuard Manager", reply_markup=_inline_menu_markup(user))
 
 
 async def givemepowers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -782,8 +808,16 @@ def _device_list_markup(clients, user, filter_name="all", page=0):
 
 async def _show_devices(message, clients, filter_name="all", page=0, user=None):
     markup, filtered, page, pages = _device_list_markup(clients, user, filter_name, page)
+    title = _device_list_title(filter_name, filtered, page, pages, clients, user)
+    await message.reply_text(title if filtered else f"{title}\nNo {filter_name} devices.", reply_markup=markup)
+
+
+def _device_list_title(filter_name, filtered, page, pages, clients, user):
     title = f"Devices · {filter_name.title()} ({len(filtered)}) · {page + 1}/{pages}"
-    await message.reply_text(title if filtered else f"No {filter_name} devices.", reply_markup=markup)
+    if user is not None and not users_db.is_admin(user):
+        limit = "∞" if user.config_limit == -1 else str(user.config_limit)
+        title += f"\nYour device limit: {len(clients)}/{limit}"
+    return title
 
 
 def _is_active(client):
@@ -846,7 +880,10 @@ async def create_name_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not users_db.is_admin(user):
         await query.edit_message_text("Admins only.")
         return ConversationHandler.END
-    await query.edit_message_text("Enter peer name:", reply_markup=CANCEL_CONV_KB)
+    await query.edit_message_text(
+        f"Enter a device name. Use 1–{MAX_PEER_NAME_LEN} characters: letters, numbers, underscore (_) or hyphen (-).",
+        reply_markup=CANCEL_CONV_KB,
+    )
     return WAITING_FOR_NEWNAME
 
 
@@ -1073,7 +1110,8 @@ async def rename_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     await query.message.reply_text(
-        f"Enter new name for <b>{html.escape(context.user_data['rename_old'])}</b>:",
+        f"Enter a new device name for <b>{html.escape(context.user_data['rename_old'])}</b>.\n"
+        f"Use 1–{MAX_PEER_NAME_LEN} characters: letters, numbers, underscore (_) or hyphen (-).",
         parse_mode="HTML",
         reply_markup=CANCEL_CONV_KB,
     )
@@ -1086,7 +1124,9 @@ async def rename_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     new_name = update.message.text.strip()
     if not PEER_NAME_RE.fullmatch(new_name):
-        await update.message.reply_text("Invalid name: use 1-15 chars, letters/digits/_/- only.")
+        await update.message.reply_text(
+            f"Invalid device name. Use 1–{MAX_PEER_NAME_LEN} characters: letters, numbers, underscore (_) or hyphen (-)."
+        )
         return WAITING_FOR_RENAME
     if len(new_name) > MAX_PEER_NAME_LEN:
         await update.message.reply_text(
@@ -1189,13 +1229,8 @@ async def users_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @require_admin
 async def requests_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reqs = users_db.list_requests(20)
-    if not reqs:
-        await update.effective_message.reply_text("No requests yet.")
-        return
-    lines = [f"📜 Request history (last {len(reqs)}):"]
-    lines += [_format_request_line(r) for r in reqs]
-    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+    text, markup = _filtered_request_history_view()
+    await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=markup)
 
 
 @require_admin
@@ -1311,17 +1346,36 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(view[0], parse_mode="HTML", reply_markup=view[1])
         return
 
-    if data.startswith("reqpage:"):
+    if data.startswith("reqpage:") or data.startswith("reqview:"):
         if not users_db.is_admin(user):
             await query.edit_message_text("Admins only.")
             return
+        parts = data.split(":")
+        if parts[0] == "reqpage" and len(parts) == 2:
+            status_filter, page_text = "all", parts[1]
+        elif len(parts) == 3 and parts[1] in {"all", "pending"}:
+            status_filter, page_text = parts[1], parts[2]
+        else:
+            return
         try:
-            page = int(data.split(":", 1)[1])
+            page = int(page_text)
         except ValueError:
             return
-        text, markup = _request_history_view(page)
-        if users_db.request_count():
-            await _send_table_or_text(context.bot, query.message.chat_id, "Request history", ["ID", "User", "Type", "Status", "Requested"], _request_table_rows(page), "\n".join(_format_request_line(r) for r in users_db.list_requests(10, offset=page * 10)))
+        text, markup = _filtered_request_history_view(page, status_filter)
+        status = None if status_filter == "all" else status_filter
+        total = users_db.request_count(status)
+        if total:
+            reqs = users_db.list_requests(10, offset=page * 10, status=status)
+            table_title = "Request history" if status_filter == "all" else "Pending requests"
+            _fallback = "\n".join(_format_request_line(r) for r in reqs)
+            await _send_table_or_text(
+                context.bot,
+                query.message.chat_id,
+                table_title,
+                ["ID", "User", "Type", "Status", "Requested"],
+                _request_table_rows(page, status_filter),
+                _fallback,
+            )
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         return
 
@@ -1667,7 +1721,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action = data[5:]
 
         if action == "home":
-            markup = INLINE_MENU_ADMIN if users_db.is_admin(user) else INLINE_MENU_USER
+            markup = _inline_menu_markup(user)
             await query.edit_message_text("WireGuard Manager", reply_markup=markup)
             return
 
@@ -1679,7 +1733,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             clients = visible_clients(user, clients)
             markup, filtered, page, pages = _device_list_markup(clients, user)
-            await query.edit_message_text(f"Devices · All ({len(filtered)}) · {page+1}/{pages}" if filtered else "No devices.", reply_markup=markup)
+            title = _device_list_title("all", filtered, page, pages, clients, user)
+            await query.edit_message_text(title if filtered else f"{title}\nNo devices.", reply_markup=markup)
 
         elif action == "create":
             if users_db.is_admin(user):
@@ -1711,9 +1766,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not users_db.is_admin(user):
                 await query.edit_message_text("Admins only.")
                 return
-            text, markup = _request_history_view()
+            text, markup = _filtered_request_history_view()
             if users_db.request_count():
-                await _send_table_or_text(context.bot, query.message.chat_id, "Request history", ["ID", "User", "Type", "Status", "Requested"], _request_table_rows(), "\n".join(_format_request_line(r) for r in users_db.list_requests(10)))
+                reqs = users_db.list_requests(10)
+                await _send_table_or_text(context.bot, query.message.chat_id, "Request history", ["ID", "User", "Type", "Status", "Requested"], _request_table_rows(), "\n".join(_format_request_line(r) for r in reqs))
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
             return
 
@@ -1740,7 +1796,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             clients = visible_clients(user, wg.list_clients())
             markup, filtered, page, pages = _device_list_markup(clients, user, filter_name, page)
-            await query.edit_message_text(f"Devices · {filter_name.title()} ({len(filtered)}) · {page+1}/{pages}" if filtered else f"No {filter_name} devices.", reply_markup=markup)
+            title = _device_list_title(filter_name, filtered, page, pages, clients, user)
+            await query.edit_message_text(title if filtered else f"{title}\nNo {filter_name} devices.", reply_markup=markup)
         except Exception as e:
             await query.edit_message_text(f"API error: {e}")
         return
@@ -1861,8 +1918,8 @@ def main():
     token = os.environ["BOT_TOKEN"]
     app = Application.builder().token(token).build()
 
-    kb_buttons_admin = ["📋 Devices", "➕ Add a device", "🗑 Remove a device", "👥 Users", "➕ Add User"]
-    kb_buttons_user = ["📋 Devices", "➕ Add a device", "🗑 Remove a device", "📈 Request Limit"]
+    kb_buttons_admin = ["📋 Devices", "➕ Add a device", "🗑 Remove a device", "👥 Users", "➕ Add User", "📜 Requests"]
+    kb_buttons_user = ["📋 Devices", "➕ Add a device", "🗑 Remove a device", "📈 Increase device limit"]
     kb_filter = filters.Text(kb_buttons_admin + kb_buttons_user)
     cancel_cb = CallbackQueryHandler(cancel_from_button, pattern="^cancel_conv$")
 
@@ -1875,7 +1932,7 @@ def main():
             MessageHandler(filters.Text(["➕ Add User"]), adduser_start),
             CommandHandler("adduser", adduser_start),
             CallbackQueryHandler(userlimit_start, pattern=r"^ulimit:"),
-            MessageHandler(filters.Text(["📈 Request Limit"]) & ~filters.COMMAND, limitreq_start),
+            MessageHandler(filters.Text(["📈 Increase device limit"]) & ~filters.COMMAND, limitreq_start),
             CallbackQueryHandler(limitreq_start, pattern=r"^menu:limitreq$"),
         ],
         states={
@@ -1917,6 +1974,7 @@ def main():
     app.add_handler(MessageHandler(filters.Text(["📋 Devices"]), list_peers))
     app.add_handler(MessageHandler(filters.Text(["🗑 Remove a device"]), delete_menu))
     app.add_handler(MessageHandler(filters.Text(["👥 Users"]), users_list_cmd))
+    app.add_handler(MessageHandler(filters.Text(["📜 Requests"]), requests_cmd))
     app.add_handler(CommandHandler("users", users_list_cmd))
     app.add_handler(CommandHandler("limit", limit_cmd))
     app.add_handler(CommandHandler("deluser", deluser_cmd))

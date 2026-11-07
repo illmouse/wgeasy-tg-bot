@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.2b] - 2026-11-07
+
+### Added
+
+- Admin request history now has **All** and **Pending** filters, shows the pending count, and lets admins approve or decline pending requests directly from the list. The Requests menu item is available from both admin menus, and `/requests` opens the same actionable view.
+- The Devices list now shows regular users their current device usage and limit.
+
+### Changed
+
+- Rename prompts explain the valid device-name format: 1–15 characters using letters, numbers, underscores or hyphens.
+- Automatically generated device names use the 8-character client-ID hash without the redundant `wg-` prefix.
+- Updated the limit-request button to **Increase device limit** and replaced the outdated “Delete a peer to free a slot” wording with device-focused guidance.
+
 ## [1.1.1b] - 2026-11-07
 
 ### Added
