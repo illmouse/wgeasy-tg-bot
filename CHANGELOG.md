@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.9] - 2026-11-08
+
+Stable release. Includes all changes since `1.1.7`, including the `1.1.8b` and `1.1.9b` betas.
+
+### Added
+
+- Regression tests for device ownership, partial deletion, request approval, callback authorization, and API failures. CI runs the test suite before publishing images.
+
+### Changed
+
+- Device list buttons show relative handshake age instead of upload/download totals and the absolute handshake timestamp. Per-user device lists retain the creation date; full traffic and handshake details remain on device detail cards.
+- Device configuration files are delivered only to the requesting user's private chat, including when creation or download starts in a group.
+- Admin username invitations bind to the first registered Telegram ID and never promote or rebind existing accounts. Previously used admin usernames cannot grant access to a new holder after a rename.
+- Device views and state changes are separated from callback routing; repeated device authorization and user-management paths are consolidated.
+- wg-easy requests have timeouts and incomplete client listings raise an error. HTTPS is required by default; deployments using trusted internal HTTP must set `WG_EASY_ALLOW_HTTP=1`.
+
+### Fixed
+
+- Failed or partial user deletion retains the user and undeleted device ownership records.
+- Request approval updates the account and decision atomically; failed approval leaves the request pending.
+- Failed device ownership persistence removes the newly created device when possible, and custom device names are preserved.
+- Invalid device-limit input can be retried; limits below `-1` are rejected consistently.
+- wg-easy download filenames are validated and HTTPS authentication cookies retain their security attributes.
+
 ## [1.1.9b] - 2026-11-08
 
 ### Changed
