@@ -105,9 +105,21 @@ class CachedListViewTests(unittest.TestCase):
 
             detail_text, detail_markup = bot._user_detail_view("bob")
             self.assertIn("DISABLED", detail_text)
+            self.assertIn("<b>Limit:</b>", detail_text)
+            self.assertIn("<b>TG:</b>", detail_text)
             action = next(button for button in self.buttons(detail_markup) if "Enable" in button.text)
             self.assertEqual(action.callback_data, "userenable:bob")
             self.assertFalse(any("Ban" in button.text for button in self.buttons(detail_markup)))
+
+    def test_admins_are_labeled_and_sorted_before_users(self):
+        bot.users_db.add_user("zadmin", tg_id=303, role="admin", limit=-1)
+        _, markup = bot._users_list_view()
+        user_buttons = [
+            button for button in self.buttons(markup)
+            if button.callback_data.startswith("user:")
+        ]
+        self.assertIn("zadmin (admin)", user_buttons[0].text)
+        self.assertEqual(user_buttons[0].callback_data, "user:zadmin:all:0")
 
     def test_device_view_uses_snapshot_and_renders_traffic_totals(self):
         bot.users_db.add_user("admin", tg_id=303, role="admin", limit=3)
@@ -142,6 +154,47 @@ class CachedListViewTests(unittest.TestCase):
         self.assertIn("↑1KB", peer_button.text)
         self.assertIn("↓2KB", peer_button.text)
         self.assertIn("08.11 12:34", peer_button.text)
+
+    def test_device_card_uses_snapshot_traffic_handshake_and_activity(self):
+        snapshot = {
+            "id": "client-1",
+            "name": "phone",
+            "enabled": True,
+            "latestHandshakeAt": "2026-11-08T12:34:56Z",
+            "transferRx": 1000,
+            "transferTx": 2000,
+        }
+        bot.users_db.update_peer_snapshots([snapshot])
+        api_detail = {
+            "id": "client-1",
+            "name": "phone",
+            "enabled": True,
+            "ipv4Address": "10.10.0.23",
+            "latestHandshakeAt": None,
+            "transferRx": 0,
+            "transferTx": 0,
+        }
+        with patch.object(bot.wg, "get_client", return_value=api_detail):
+            inactive_text, _ = bot._peer_info_view("client-1", admin=False)
+
+        self.assertIn("<b>Owner:</b> @alice", inactive_text)
+        self.assertIn("<b>Status:</b> 🟢 Enabled", inactive_text)
+        self.assertIn("<b>Activity:</b> Inactive", inactive_text)
+        self.assertIn("<b>Last handshake:</b> 08.11 12:34", inactive_text)
+        self.assertIn("<b>Traffic total:</b> ↑ Upload 1.00 KB · ↓ Download 2.00 KB", inactive_text)
+
+        snapshot["transferRx"] = 1500
+        bot.users_db.update_peer_snapshots([snapshot])
+        with patch.object(bot.wg, "get_client", return_value=api_detail):
+            active_text, _ = bot._peer_info_view("client-1", admin=False)
+        self.assertIn("<b>Activity:</b> Active", active_text)
+        self.assertIn("↑ Upload 1.50 KB", active_text)
+
+        api_detail["enabled"] = False
+        with patch.object(bot.wg, "get_client", return_value=api_detail):
+            disabled_active_text, _ = bot._peer_info_view("client-1", admin=False)
+        self.assertIn("<b>Status:</b> 🔴 Disabled", disabled_active_text)
+        self.assertIn("<b>Activity:</b> Active", disabled_active_text)
 
     def test_command_and_reply_keyboard_cancel_are_silent(self):
         message = _CancellableMessage()

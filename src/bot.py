@@ -642,6 +642,7 @@ def _users_list_view(page=0, status_filter="all"):
     if not users_db.list_users():
         return None
     users = users_db.list_users(None if status_filter == "all" else status_filter)
+    users.sort(key=lambda user: (user.role != "admin", user.username))
     page_size = PAGE_SIZE
     total_pages = max(1, (len(users) + page_size - 1) // page_size)
     page = max(0, min(page, total_pages - 1))
@@ -657,7 +658,8 @@ def _users_list_view(page=0, status_filter="all"):
         peers = users_db.peers_of(u.username)
         peer_count = sum(1 for name in peers if name in snapshot_names)
         limit = u.config_limit if u.config_limit >= 0 else "∞"
-        label = f"{u.username} {peer_count}/{limit}"
+        admin_label = " (admin)" if u.role == "admin" else ""
+        label = f"{u.username}{admin_label} {peer_count}/{limit}"
         if u.status == "disabled":
             label += " ⛔"
         rows.append([InlineKeyboardButton(label, callback_data=f"user:{u.username}:{status_filter}:{page}")])
@@ -693,8 +695,8 @@ def _user_detail_view(username, back_target="menu:users"):
     head = f"👤 <b>{html.escape(username)}</b> [{u.role}]"
     if u.status == "disabled":
         head += " ⛔ DISABLED"
-    lines = [head, f"Limit: {len(active)}/{limit}"]
-    lines.append(f"TG: {u.tg_id}" if u.tg_id not in (None, -1) else "TG: pending")
+    lines = [head, f"<b>Limit:</b> {len(active)}/{limit}"]
+    lines.append(f"<b>TG:</b> {u.tg_id}" if u.tg_id not in (None, -1) else "<b>TG:</b> pending")
     peers_label = f"👥 Devices ({len(active)})"
     role_label = "⬇ Demote to user" if u.role == "admin" else "⬆ Promote to admin"
     status_button = InlineKeyboardButton(
@@ -755,10 +757,18 @@ def _peer_info_view(client_id, admin=True, back_target=None):
         c = wg.get_client(client_id)
     except Exception:
         return None
+    snapshot = users_db.get_peer_snapshot(client_id)
+    if snapshot is not None:
+        c = {
+            **c,
+            "latestHandshakeAt": snapshot["latestHandshakeAt"],
+            "transferRx": snapshot["transferRx"],
+            "transferTx": snapshot["transferTx"],
+        }
     name = str(c.get("name", ""))
     rec = users_db.get_peer(name)
     owner = rec["owner"] if rec else None
-    status = "🟢 enabled" if c.get("enabled") else "🔴 disabled"
+    status = "🟢 Enabled" if c.get("enabled") else "🔴 Disabled"
     ip = c.get("ipv4Address") or "N/A"
     created = _dt_short(rec["created_at"], with_time=True) if rec else "—"
     hs = c.get("latestHandshakeAt")
@@ -771,13 +781,15 @@ def _peer_info_view(client_id, admin=True, back_target=None):
     hs_line = f"{_dt_short(hs, with_time=True)} ({_handshake_ago(c)} ago)" if parsed_hs is not None else "never"
     lines = [f"🔹 <b>{html.escape(name)}</b>"]
     if owner:
-        lines.append(f"Owner: @{owner}")
-    lines.append(f"Status: {status}")
-    lines.append(f"IP: {ip}")
-    lines.append(f"Created: {created}")
-    lines.append(f"Last handshake: {hs_line}")
+        lines.append(f"<b>Owner:</b> @{html.escape(owner)}")
+    lines.append(f"<b>Status:</b> {status}")
+    activity = "Active" if snapshot is not None and snapshot["is_active"] else "Inactive"
+    lines.append(f"<b>Activity:</b> {activity}")
+    lines.append(f"<b>IP:</b> {html.escape(str(ip))}")
+    lines.append(f"<b>Created:</b> {created}")
+    lines.append(f"<b>Last handshake:</b> {hs_line}")
     lines.append(
-        f"Traffic total: ↑ Upload {format_bytes(c.get('transferRx'))} · "
+        f"<b>Traffic total:</b> ↑ Upload {format_bytes(c.get('transferRx'))} · "
         f"↓ Download {format_bytes(c.get('transferTx'))}"
     )
     toggle = "⏸ Disable" if c.get("enabled") else "▶ Enable"
@@ -960,14 +972,18 @@ def _device_list_markup(clients, user, filter_name="all", page=0):
 async def _show_devices(message, clients, filter_name="all", page=0, user=None):
     markup, filtered, page, pages = _device_list_markup(clients, user, filter_name, page)
     title = _device_list_title(filter_name, filtered, page, pages, clients, user)
-    await message.reply_text(title if filtered else f"{title}\nNo {filter_name} devices.", reply_markup=markup)
+    await message.reply_text(
+        title if filtered else f"{title}\nNo {filter_name} devices.",
+        parse_mode="HTML",
+        reply_markup=markup,
+    )
 
 
 def _device_list_title(filter_name, filtered, page, pages, clients, user):
     title = f"Devices · {filter_name.title()} ({len(filtered)}) · {page + 1}/{pages}"
     if user is not None and not users_db.is_admin(user):
         limit = "∞" if user.config_limit == -1 else str(user.config_limit)
-        title += f"\nYour device limit: {len(clients)}/{limit}"
+        title += f"\n<b>Your device limit:</b> {len(clients)}/{limit}"
     return title
 
 
@@ -2007,7 +2023,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             clients = visible_clients(user, users_db.list_peer_snapshots())
             markup, filtered, page, pages = _device_list_markup(clients, user, filter_name, page)
             title = _device_list_title(filter_name, filtered, page, pages, clients, user)
-            await query.edit_message_text(title if filtered else f"{title}\nNo {filter_name} devices.", reply_markup=markup)
+            await query.edit_message_text(
+                title if filtered else f"{title}\nNo {filter_name} devices.",
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
         except Exception as e:
             await query.edit_message_text(f"API error: {e}")
         return

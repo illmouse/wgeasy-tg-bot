@@ -72,7 +72,7 @@ The bot stores users in a SQLite database. Mount a volume to persist `users.db` 
 
 The main menu opens **Devices**. Browse the paginated list using the **All**, **Active**, **Enabled**, and **Disabled** filters. **Active** means the device's received (upload) counter increased since its previous sample; snapshots update at startup and once per minute. The list and device details show cumulative upload and download totals. Your current device usage and limit are shown in the list.
 
-Open a device for its details and configuration download. Users can rename or remove their own devices from the device details; admins can rename any device and also manage device status and removal.
+Open a device for its details and configuration download. The detail card shows whether it is enabled and active, along with handshake and traffic totals. Users can rename or remove their own devices from the device details; admins can rename any device and also manage device status and removal.
 
 Users create devices for themselves. Admins can create devices for themselves or another registered user, and may choose a custom name. Automatically generated names use an 8-character hash without a prefix. Device names can contain 1–15 letters, numbers, underscores, or hyphens. The bot sends the configuration file after creation.
 
@@ -103,7 +103,7 @@ Unregistered users can request access with `/givemepowers`. Admins who have star
 
 #### User and role controls
 
-In `/users`, admins can filter the registered-user list by **All**, **Enabled**, or **Disabled**, then open a user’s details to review their devices and requests, change their limit, enable or disable them, delete them, or promote/demote their role. The last admin cannot be demoted. `/disable` disables the user account and their devices; `/enable` restores access and re-enables the devices. Deleting a user also deletes their devices from wg-easy.
+In `/users`, admins appear first and are labeled **(admin)**. Admins can filter the registered-user list by **All**, **Enabled**, or **Disabled**, then open a user’s details to review their devices and requests, change their limit, enable or disable them, delete them, or promote/demote their role. The last admin cannot be demoted. `/disable` disables the user account and their devices; `/enable` restores access and re-enables the devices. Deleting a user also deletes their devices from wg-easy.
 
 #### Limits and request history
 

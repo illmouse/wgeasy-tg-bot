@@ -501,6 +501,24 @@ class UserDB:
             for row in rows
         ]
 
+    def get_peer_snapshot(self, client_id: str | int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT client_id, name, enabled, latest_handshake_at, transfer_rx, transfer_tx, is_active "
+            "FROM peer_snapshots WHERE client_id = ?",
+            (str(client_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["client_id"],
+            "name": row["name"],
+            "enabled": bool(row["enabled"]),
+            "latestHandshakeAt": row["latest_handshake_at"],
+            "transferRx": row["transfer_rx"],
+            "transferTx": row["transfer_tx"],
+            "is_active": bool(row["is_active"]),
+        }
+
     def _norm_owner(self, owner: str) -> str:
         return str(owner).strip().lstrip("@").lower()
 

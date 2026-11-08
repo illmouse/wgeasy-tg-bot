@@ -16,6 +16,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Inline Cancel and Close actions remove their bot message; `/cancel` and the reply-keyboard Cancel action are silent and delete the cancellation message where Telegram permits.
 
+## [1.1.6b] - 2026-11-08
+
+### Added
+
+- Device details show Enabled/Disabled and Active/Inactive states, using the same handshake and traffic snapshot values as the device list.
+- Admins are labeled and shown before regular users in the registered-user list.
+
+### Changed
+
+- Field labels are bolded in device and user detail cards.
+
 ## [1.1.4b] - 2026-11-07
 
 ### Added
