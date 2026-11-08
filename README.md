@@ -32,13 +32,18 @@ USERS_DB_PATH=users.db
 | Variable | Description |
 |---|---|
 | `WG_EASY_URL` | Base URL of your wg-easy instance |
+| `WG_EASY_ALLOW_HTTP` | Set to `1` only for trusted internal HTTP endpoints (HTTPS is required by default) |
 | `WG_EASY_LOGIN` | wg-easy username |
 | `WG_EASY_PASSWORD` | wg-easy password |
 | `BOT_TOKEN` | Telegram bot token from @BotFather |
-| `ADMIN_USERNAMES` | Comma-separated Telegram usernames of admins (without `@`) |
+| `ADMIN_USERNAMES` | Comma-separated Telegram usernames allowed to register as admins (without `@`). Existing database accounts are never promoted or rebound by this setting. Previously used admin usernames remain reserved after a username change, so a new holder of the old name cannot gain admin access. You can also promote registered users through the bot menu after they have started the bot. |
 | `USERNAMES` | Comma-separated Telegram usernames of regular users bootstrap (without `@`) |
 | `DEFAULT_CONFIG_LIMIT` | Default per-user device limit for newly added users (default `3`) |
 | `USERS_DB_PATH` | Path to the SQLite user database (default `users.db`) |
+
+For deployments that currently use an internal `http://` wg-easy URL, add
+`WG_EASY_ALLOW_HTTP=1` to `.env` before upgrading. HTTPS deployments need no
+additional setting.
 
 ### 3. Run with Docker Compose
 
@@ -61,6 +66,11 @@ docker compose up -d
 
 The bot stores users in a SQLite database. Mount a volume to persist `users.db` across container restarts (as shown above).
 
+To test a beta release, replace `:main` in your Compose image reference with
+its versioned beta tag (for example, `:v1.1.8b`), then run
+`docker compose pull && docker compose up -d`. Back up `users.db` before
+upgrading; restore the previous image tag and database backup to roll back.
+
 ## Usage
 
 | Context | How to use |
@@ -72,9 +82,9 @@ The bot stores users in a SQLite database. Mount a volume to persist `users.db` 
 
 The main menu opens **Devices**. Browse the paginated list using the **All**, **Active**, **Enabled**, and **Disabled** filters. **Active** means the device's received (upload) counter increased since its previous sample; snapshots update at startup and once per minute. The list and device details show cumulative upload and download totals. Your current device usage and limit are shown in the list.
 
-Open a device for its details and configuration download. The detail card shows whether it is **Enabled** or **Disabled**, whether it is **Active** or **Inactive**, and includes the creation date with year, handshake and traffic totals. Users can rename or remove their own devices from the device details; admins can rename any device and also manage device status and removal.
+Open a device for its details and configuration download. Configuration files are delivered only to the requesting user's private chat with the bot; start the bot privately before requesting a configuration from a group. The detail card shows whether it is **Enabled** or **Disabled**, whether it is **Active** or **Inactive**, and includes the creation date with year, handshake and traffic totals. Users can rename or remove their own devices from the device details; admins can rename any device and also manage device status and removal.
 
-Users create devices for themselves. Admins can create devices for themselves or another registered user, and may choose a custom name. Automatically generated names use an 8-character hash without a prefix. Device names can contain 1–15 letters, numbers, underscores, or hyphens. The bot sends the configuration file after creation.
+Users create devices for themselves. Admins can create devices for themselves or another registered user, and may choose a custom name. Automatically generated names use an 8-character hash without a prefix. Device names can contain 1–15 letters, numbers, underscores, or hyphens. The bot delivers the configuration to the requesting user's private chat after creation.
 
 ### Commands
 

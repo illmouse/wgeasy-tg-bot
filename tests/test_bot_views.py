@@ -50,6 +50,7 @@ def _install_telegram_stubs():
 
 _install_telegram_stubs()
 os.environ.setdefault("WG_EASY_URL", "http://localhost")
+os.environ.setdefault("WG_EASY_ALLOW_HTTP", "1")
 os.environ.setdefault("WG_EASY_LOGIN", "test")
 os.environ.setdefault("WG_EASY_PASSWORD", "test")
 _BOT_DB_DIR = tempfile.TemporaryDirectory()

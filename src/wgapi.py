@@ -1,15 +1,21 @@
 import os
 import threading
+import re
 import requests
 
 # wg-easy v15+ authenticates via /api/auth/password; older versions
 # (v14 and Amnezia forks) accept the same payload at /api/session.
 AUTH_PATHS = ("/api/auth/password", "/api/session")
+REQUEST_TIMEOUT = (3.05, 10)
 
 
 class WGEasyAPI:
     def __init__(self):
         self.base_url = os.environ["WG_EASY_URL"].rstrip("/")
+        if not self.base_url.startswith("https://") and not (
+            self.base_url.startswith("http://") and os.environ.get("WG_EASY_ALLOW_HTTP") == "1"
+        ):
+            raise ValueError("WG_EASY_URL must use HTTPS (set WG_EASY_ALLOW_HTTP=1 for trusted internal HTTP)")
         self.username = os.environ["WG_EASY_LOGIN"]
         self.password = os.environ["WG_EASY_PASSWORD"]
         self.session = requests.Session()
@@ -25,6 +31,7 @@ class WGEasyAPI:
             resp = self.session.post(
                 f"{self.base_url}{path}",
                 json={"username": self.username, "password": self.password, "remember": False},
+                timeout=REQUEST_TIMEOUT,
             )
             if resp.status_code == 404:
                 continue
@@ -33,14 +40,10 @@ class WGEasyAPI:
             break
         else:
             resp.raise_for_status()
-        # Strip the Secure flag so cookies are sent over plain HTTP too
-        # (needed when connecting directly to wg-easy inside Docker without TLS).
-        # The cookie domain is cleared as well: custom builds may set a
-        # Domain that does not match the host we actually talk to.
-        for cookie in self.session.cookies:
-            cookie.secure = False
-            cookie.domain = ""
-            cookie.domain_specified = False
+        if self.base_url.startswith("http://"):
+            # Explicitly opted-in internal HTTP cannot carry Secure cookies.
+            for cookie in self.session.cookies:
+                cookie.secure = False
         self._authenticated = True
 
     def _request(self, method, path, **kwargs):
@@ -51,6 +54,7 @@ class WGEasyAPI:
         if not self._authenticated:
             self.login()
         url = f"{self.base_url}{path}"
+        kwargs.setdefault("timeout", REQUEST_TIMEOUT)
         resp = self.session.request(method, url, **kwargs)
         if resp.status_code == 401:
             self._authenticated = False
@@ -71,9 +75,15 @@ class WGEasyAPI:
                 raise ValueError(f"Unexpected /api/client response: {type(data).__name__}")
             clients.extend(batch)
             total = data.get("total")
-            if not batch or len(batch) < 100 or (isinstance(total, int) and len(clients) >= total):
+            if not batch and isinstance(total, int) and len(clients) < total:
+                raise ValueError("Client listing ended before reaching the reported total")
+            if not batch or (isinstance(total, int) and len(clients) >= total) or (
+                not isinstance(total, int) and len(batch) < 100
+            ):
                 break
             page += 1
+        else:
+            raise ValueError("Client listing exceeded the 50-page limit")
         return clients
 
     def create_client(self, name: str):
@@ -102,7 +112,9 @@ class WGEasyAPI:
         """Returns (config_bytes, filename)."""
         resp = self._request("GET", f"/api/client/{client_id}/configuration")
         cd = resp.headers.get("Content-Disposition", "")
-        filename = f"peer-{client_id}.conf"
+        filename = f"peer-{re.sub(r'[^A-Za-z0-9_-]', '_', str(client_id))}.conf"
         if 'filename="' in cd:
-            filename = cd.split('filename="')[1].rstrip('"')
+            candidate = cd.split('filename="', 1)[1].split('"', 1)[0]
+            if re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", candidate) and candidate not in (".", ".."):
+                filename = candidate
         return resp.content, filename

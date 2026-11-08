@@ -13,13 +13,15 @@ class User:
 
 class UserDB:
     def __init__(self, path: str, default_limit: int = 3):
+        if default_limit < -1:
+            raise ValueError("Default config limit must be -1 or greater")
         self.path = path
         self.default_limit = default_limit
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self._ensure_schema()
-        self._admins = set()
         self._users = set()
+        self._admins = set()
 
     def _ensure_schema(self):
         cur = self.conn.cursor()
@@ -60,20 +62,25 @@ class UserDB:
             )
             """
         )
-        for statement in (
-            "ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'enabled'",
-            "ALTER TABLE users ADD COLUMN disabled_at TEXT",
-            "ALTER TABLE users ADD COLUMN disabled_by TEXT",
-            "ALTER TABLE users ADD COLUMN disabled_until TEXT",
-            "ALTER TABLE requests ADD COLUMN type TEXT NOT NULL DEFAULT 'access'",
-            "ALTER TABLE requests ADD COLUMN requested_limit INTEGER",
-            "ALTER TABLE requests ADD COLUMN previous_limit INTEGER",
-            "ALTER TABLE requests ADD COLUMN notification_refs TEXT NOT NULL DEFAULT '[]'",
-        ):
-            try:
-                cur.execute(statement)
-            except sqlite3.OperationalError:
-                pass
+        migrations = {
+            "users": {
+                "status": "TEXT NOT NULL DEFAULT 'enabled'",
+                "disabled_at": "TEXT",
+                "disabled_by": "TEXT",
+                "disabled_until": "TEXT",
+            },
+            "requests": {
+                "type": "TEXT NOT NULL DEFAULT 'access'",
+                "requested_limit": "INTEGER",
+                "previous_limit": "INTEGER",
+                "notification_refs": "TEXT NOT NULL DEFAULT '[]'",
+            },
+        }
+        for table, columns in migrations.items():
+            existing = {row[1] for row in cur.execute(f"PRAGMA table_info({table})")}
+            for name, definition in columns.items():
+                if name not in existing:
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
         user_columns = {row[1] for row in cur.execute("PRAGMA table_info(users)").fetchall()}
         for old_name, new_name in (
             ("banned_at", "disabled_at"),
@@ -100,19 +107,28 @@ class UserDB:
             )
             """
         )
+        cur.execute("CREATE TABLE IF NOT EXISTS admin_username_history (username TEXT PRIMARY KEY)")
         self.conn.commit()
 
-    def set_bootstrap_sets(self, admins: set[str], users: set[str]) -> None:
-        self._admins = set()
-        for a in admins or set():
-            s = str(a).strip().lstrip("@").lower()
-            if s:
-                self._admins.add(s)
-        self._users = set()
-        for u in users or set():
-            s = str(u).strip().lstrip("@").lower()
-            if s:
-                self._users.add(s)
+    @staticmethod
+    def _normalize_username(username: str) -> str:
+        return str(username).strip().lstrip("@").lower()
+
+    def set_bootstrap_sets(self, admins: list[str], users: set[str]) -> None:
+        """Configure username invitations without changing existing accounts."""
+        self._users = {name for u in users or set() if (name := self._normalize_username(u))}
+        self._admins = {name for a in admins if (name := self._normalize_username(a))}
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO admin_username_history (username) "
+                "SELECT username FROM users WHERE role = 'admin'"
+            )
+
+    @staticmethod
+    def _remember_admin_name(cur: sqlite3.Cursor, username: str) -> None:
+        cur.execute(
+            "INSERT OR IGNORE INTO admin_username_history (username) VALUES (?)", (username,)
+        )
 
     def _row_to_user(self, row: sqlite3.Row) -> User:
         return User(
@@ -129,34 +145,52 @@ class UserDB:
             cur.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
             row = cur.fetchone()
             if row:
+                if username:
+                    new_name = str(username).strip().lstrip("@").lower()
+                    if new_name and new_name != row["username"]:
+                        try:
+                            with self.conn:
+                                old_name = row["username"]
+                                if row["role"] == "admin":
+                                    self._remember_admin_name(cur, old_name)
+                                cur.execute("UPDATE users SET username = ? WHERE tg_id = ?", (new_name, tg_id))
+                                cur.execute("UPDATE peers SET owner = ? WHERE owner = ?", (new_name, old_name))
+                                cur.execute("UPDATE requests SET username = ? WHERE tg_id = ?", (new_name, tg_id))
+                            cur.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
+                            row = cur.fetchone()
+                        except sqlite3.IntegrityError:
+                            # A reserved username must not be assigned to another account.
+                            pass
                 return self._row_to_user(row)
         if username is not None:
             uname = str(username).strip().lstrip("@").lower()
             if not uname:
                 return None
-            cur.execute(
-                "SELECT * FROM users WHERE tg_id IS NULL AND username = ?",
-                (uname,),
-            )
+            cur.execute("SELECT * FROM users WHERE username = ?", (uname,))
             row = cur.fetchone()
             if row:
+                if row["tg_id"] is not None or tg_id is None:
+                    return None
                 cur.execute("UPDATE users SET tg_id = ? WHERE username = ?", (tg_id, uname))
                 self.conn.commit()
                 cur.execute("SELECT * FROM users WHERE username = ?", (uname,))
                 row = cur.fetchone()
                 if row:
                     return self._row_to_user(row)
-            if uname in self._admins:
-                cur.execute(
-                    "INSERT INTO users (username, tg_id, role, config_limit, status) "
-                    "VALUES (?, ?, 'admin', -1, 'enabled')",
-                    (uname, tg_id),
-                )
-                self.conn.commit()
+            if tg_id is None:
+                return None
+            if uname in self._admins and not cur.execute(
+                "SELECT 1 FROM admin_username_history WHERE username = ?", (uname,)
+            ).fetchone():
+                with self.conn:
+                    cur.execute(
+                        "INSERT INTO users (username, tg_id, role, config_limit, status) "
+                        "VALUES (?, ?, 'admin', -1, 'enabled')",
+                        (uname, tg_id),
+                    )
+                    self._remember_admin_name(cur, uname)
                 cur.execute("SELECT * FROM users WHERE username = ?", (uname,))
-                row = cur.fetchone()
-                if row:
-                    return self._row_to_user(row)
+                return self._row_to_user(cur.fetchone())
             if uname in self._users:
                 cur.execute(
                     "INSERT INTO users (username, tg_id, role, config_limit, status) "
@@ -181,6 +215,8 @@ class UserDB:
         uname = str(username).strip().lstrip("@").lower()
         if limit is None:
             limit = self.default_limit
+        if limit < -1:
+            raise ValueError("Config limit must be -1 or greater")
         cur = self.conn.cursor()
         cur.execute("SELECT 1 FROM users WHERE username = ?", (uname,))
         if cur.fetchone():
@@ -193,6 +229,8 @@ class UserDB:
             "INSERT INTO users (username, tg_id, role, config_limit, status) VALUES (?, ?, ?, ?, 'enabled')",
             (uname, tg_id, role, limit),
         )
+        if role == "admin":
+            self._remember_admin_name(cur, uname)
         self.conn.commit()
         cur.execute("SELECT * FROM users WHERE username = ?", (uname,))
         row = cur.fetchone()
@@ -205,6 +243,8 @@ class UserDB:
         return cur.fetchone() is not None
 
     def set_limit(self, username: str, limit: int) -> User:
+        if limit < -1:
+            raise ValueError("Config limit must be -1 or greater")
         uname = str(username).strip().lstrip("@").lower()
         cur = self.conn.cursor()
         cur.execute("UPDATE users SET config_limit = ? WHERE username = ?", (limit, uname))
@@ -326,6 +366,50 @@ class UserDB:
         self.conn.commit()
         return cur.rowcount > 0
 
+    def approve_request(self, req_id: int, admin_id: int, admin_username: str) -> User | None:
+        """Apply a pending request and record its approval in one transaction.
+
+        Returns None if another administrator has already decided the request.
+        Invalid requests remain pending so they can be investigated.
+        """
+        with self.conn:
+            cur = self.conn.cursor()
+            cur.execute("SELECT * FROM requests WHERE id = ? AND status = 'pending'", (req_id,))
+            request = cur.fetchone()
+            if request is None:
+                return None
+            if request["type"] == "limit":
+                limit = request["requested_limit"]
+                if not isinstance(limit, int) or limit < -1:
+                    raise ValueError("Invalid requested limit")
+                cur.execute(
+                    "UPDATE users SET config_limit = ? WHERE tg_id = ?",
+                    (limit, request["tg_id"]),
+                )
+                if cur.rowcount == 0:
+                    raise KeyError("User no longer exists")
+                cur.execute("SELECT * FROM users WHERE tg_id = ?", (request["tg_id"],))
+            elif request["type"] == "access":
+                username = request["username"] or f"user{request['tg_id']}"
+                username = str(username).strip().lstrip("@").lower()
+                if not username:
+                    raise ValueError("Invalid username")
+                cur.execute(
+                    "INSERT INTO users (username, tg_id, role, config_limit, status) "
+                    "VALUES (?, ?, 'user', ?, 'enabled')",
+                    (username, request["tg_id"], self.default_limit),
+                )
+                cur.execute("SELECT * FROM users WHERE tg_id = ?", (request["tg_id"],))
+            else:
+                raise ValueError("Unknown request type")
+            row = cur.fetchone()
+            cur.execute(
+                "UPDATE requests SET status = 'approved', admin_id = ?, admin_username = ?, "
+                "decided_at = datetime('now') WHERE id = ? AND status = 'pending'",
+                (admin_id, admin_username, req_id),
+            )
+            return self._row_to_user(row)
+
     def list_requests(
         self,
         limit: int = 20,
@@ -408,17 +492,22 @@ class UserDB:
         uname = str(username).strip().lstrip("@").lower()
         cur = self.conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
-        cur.execute("SELECT role FROM users WHERE username = ?", (uname,))
+        cur.execute("SELECT role, tg_id FROM users WHERE username = ?", (uname,))
         existing = cur.fetchone()
         if existing is None:
             self.conn.rollback()
             raise KeyError(username)
+        if role == "admin" and existing["role"] != "admin" and existing["tg_id"] is None:
+            self.conn.rollback()
+            raise ValueError("user must start the bot before promotion to admin")
         if existing["role"] == "admin" and role != "admin":
             cur.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'")
             if cur.fetchone()[0] <= 1:
                 self.conn.rollback()
                 raise ValueError("cannot demote the last admin")
         cur.execute("UPDATE users SET role = ? WHERE username = ?", (role, uname))
+        if role == "admin":
+            self._remember_admin_name(cur, uname)
         self.conn.commit()
         return self.get_user(uname)
 

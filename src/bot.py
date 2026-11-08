@@ -5,8 +5,8 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
 import string
-from datetime import datetime, timezone
 from functools import wraps
 from io import BytesIO
 
@@ -29,13 +29,34 @@ from telegram.ext import (
 )
 
 from users import User, UserDB
+from device_operations import (
+    DeviceOperationError,
+    PartialDeletionError,
+    create_owned_device,
+    delete_user_devices,
+    set_user_devices_enabled,
+)
+from bot_views import (
+    PAGE_SIZE,
+    back_close_row as _back_close_row,
+    compact_bytes as _compact_bytes,
+    dt_short as _dt_short,
+    filtered_request_history_view,
+    format_request_line as _format_request_line,
+    handshake_ago as _handshake_ago,
+    peer_info_view,
+    peers_list_view,
+    request_history_rich_message,
+    request_table_rows,
+    user_detail_view,
+    users_list_view,
+)
 from ui_helpers import (
     apply_peer_sample,
     delete_callback_message,
     delete_message_silently,
     fetch_peer_sample,
     filter_peer_snapshots,
-    format_bytes,
 )
 from wgapi import WGEasyAPI
 
@@ -64,7 +85,7 @@ except Exception:
     default_limit = 3
 
 users_db = UserDB(os.environ.get("USERS_DB_PATH", "users.db"), default_limit=default_limit)
-users_db.set_bootstrap_sets(_parse_env_set("ADMIN_USERNAMES"), _parse_env_set("USERNAMES"))
+users_db.set_bootstrap_sets(os.environ.get("ADMIN_USERNAMES", "").split(","), _parse_env_set("USERNAMES"))
 
 WAITING_FOR_RENAME = 3
 WAITING_FOR_NEWUSER = 4
@@ -72,7 +93,6 @@ WAITING_FOR_NEWNAME = 5
 WAITING_FOR_USERLIMIT = 6
 WAITING_FOR_LIMITREQ = 7
 
-PAGE_SIZE = 8
 PEER_SAMPLE_INTERVAL_SECONDS = 60
 MAX_PEER_NAME_LEN = 15
 PEER_NAME_LEN = 8
@@ -287,23 +307,6 @@ def format_peers_text(clients: list) -> str:
     return "\n".join(lines)
 
 
-def _dt_short(value, with_time=False, with_year=False):
-    if not value:
-        return "—"
-    try:
-        dt = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        try:
-            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except ValueError:
-            return "—"
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    if with_year:
-        return dt.strftime("%d.%m.%Y %H:%M" if with_time else "%d.%m.%Y")
-    return dt.strftime("%d.%m %H:%M" if with_time else "%d.%m")
-
-
 def _is_message_not_modified_error(error):
     return "message is not modified" in str(error).lower()
 
@@ -316,134 +319,17 @@ async def _edit_callback_message_if_changed(query, *args, **kwargs):
             raise
 
 
-def _compact_bytes(value):
-    formatted = format_bytes(value)
-    amount, _, unit = formatted.partition(" ")
-    if amount.endswith(".00"):
-        amount = amount[:-3]
-    elif amount.endswith("0") and "." in amount:
-        amount = amount[:-1]
-    return f"{amount}{unit}"
-
-
-def _handshake_ago(client):
-    hs = client.get("latestHandshakeAt")
-    if not hs:
-        return "—"
-    try:
-        hs_dt = datetime.fromisoformat(str(hs).replace("Z", "+00:00"))
-    except ValueError:
-        return "—"
-    if hs_dt.tzinfo is None:
-        hs_dt = hs_dt.replace(tzinfo=timezone.utc)
-    sec = (datetime.now(timezone.utc) - hs_dt).total_seconds()
-    if sec < 0:
-        sec = 0
-    if sec < 3600:
-        return f"{int(sec // 60)}m"
-    if sec < 86400:
-        return f"{int(sec // 3600)}h"
-    return f"{int(sec // 86400)}d"
-
-
-def _format_request_line(r):
-    status_icon = {"pending": "⏳", "approved": "✅", "declined": "❌"}.get(r.get("status"), "•")
-    type_icon = "📈" if r.get("type") == "limit" else "🔑"
-    if r.get("username"):
-        who = "@" + r["username"]
-    elif r.get("first_name") or r.get("last_name"):
-        who = html.escape(f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip())
-    else:
-        who = f"id {r['tg_id']}"
-    line = f"#{r['id']} {status_icon} {type_icon} {who}"
-    if r.get("type") == "limit" and r.get("requested_limit") is not None:
-        requested = _display_limit(r.get("requested_limit"))
-        line += f" · → {requested}"
-    line += f" · {_dt_short(r.get('requested_at'), with_time=True)}"
-    if r.get("status") != "pending" and r.get("admin_username"):
-        line += f" · by @{r['admin_username']}"
-    return line
-
-
-def _display_limit(limit):
-    if limit is None:
-        return "—"
-    return "∞" if limit == -1 else str(limit)
-
-
-def _request_action_label(r):
-    if r.get("username"):
-        who = "@" + r["username"]
-    elif r.get("first_name") or r.get("last_name"):
-        who = f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip()
-    else:
-        who = str(r["tg_id"])
-    label = f"#{r['id']} {'📈' if r.get('type') == 'limit' else '🔑'} {who}"
-    if r.get("type") == "limit" and r.get("requested_limit") is not None:
-        label += f" → {_display_limit(r.get('requested_limit'))}"
-    return label[:60]
-
-
 def _request_history_view(page=0):
     page_size = 10
     return _filtered_request_history_view(page, "all", page_size)
 
 
 def _filtered_request_history_view(page=0, status_filter="all", page_size=10):
-    status = None if status_filter == "all" else status_filter
-    total = users_db.request_count(status)
-    pending_total = users_db.request_count("pending")
-    total_pages = max(1, (total + page_size - 1) // page_size)
-    page = max(0, min(page, total_pages - 1))
-    reqs = users_db.list_requests(page_size, offset=page * page_size, status=status)
-    rows = []
-    if status_filter == "pending":
-        for r in reqs:
-            rows.append([
-                InlineKeyboardButton(_request_action_label(r), callback_data="noop"),
-                InlineKeyboardButton("✅ Approve", callback_data=f"reqhist:approve:{r['id']}:{page}"),
-                InlineKeyboardButton("❌ Decline", callback_data=f"reqhist:decline:{r['id']}:{page}"),
-            ])
-    filter_buttons = []
-    if status_filter == "pending":
-        filter_buttons.append(InlineKeyboardButton(f"All ({users_db.request_count()})", callback_data="reqview:all:0"))
-    else:
-        filter_buttons.append(InlineKeyboardButton(f"Pending ({pending_total})", callback_data="reqview:pending:0"))
-    rows.insert(0, filter_buttons)
-    nav = []
-    if page:
-        nav.append(InlineKeyboardButton("◀ Previous page", callback_data=f"reqview:{status_filter}:{page - 1}"))
-    if total_pages > 1:
-        nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
-    if page + 1 < total_pages:
-        nav.append(InlineKeyboardButton("Next page ▶", callback_data=f"reqview:{status_filter}:{page + 1}"))
-    if nav:
-        rows.append(nav)
-    rows.append([InlineKeyboardButton("Close", callback_data="reqclose")])
-    title = f"📜 Pending ({pending_total})" if status_filter == "pending" else f"📜 Request history · Pending ({pending_total})"
-    text = title
-    if status_filter == "pending" and not reqs:
-        text += "\nNo pending requests."
-    elif status_filter == "all" and not total:
-        text += "\nNo requests yet."
-    return text, InlineKeyboardMarkup(rows)
+    return filtered_request_history_view(users_db, page, status_filter, page_size)
 
 
 def _request_table_rows(page=0, status_filter="all"):
-    status = None if status_filter == "all" else status_filter
-    reqs = users_db.list_requests(10, offset=max(0, page) * 10, status=status)
-    return [
-        [
-            f"#{r['id']}",
-            r.get("username") or str(r["tg_id"]),
-            "Limit change" if r.get("type") == "limit" else "Access",
-            f"→ {_display_limit(r.get('requested_limit'))}" if r.get("type") == "limit" and r.get("requested_limit") is not None else "—",
-            r["status"],
-            f"@{r['admin_username']}" if r.get("admin_username") else "—",
-            _dt_short(r.get("requested_at"), True),
-        ]
-        for r in reqs
-    ]
+    return request_table_rows(users_db, page, status_filter)
 
 
 async def _send_request_history_table(bot, chat_id, page=0, status_filter="all"):
@@ -461,50 +347,7 @@ async def _send_request_history_table(bot, chat_id, page=0, status_filter="all")
 
 
 def _request_history_rich_message(page=0, status_filter="all", page_size=10):
-    status = None if status_filter == "all" else status_filter
-    total = users_db.request_count(status)
-    pending_total = users_db.request_count("pending")
-    total_pages = max(1, (total + page_size - 1) // page_size)
-    page = max(0, min(page, total_pages - 1))
-    reqs = users_db.list_requests(page_size, offset=page * page_size, status=status)
-    blocks = [{
-        "type": "paragraph",
-        "text": f"📜 Request history · Pending ({pending_total})" if status_filter == "all" else f"📜 Pending ({pending_total})",
-    }]
-
-    if status_filter == "all" and reqs:
-        rows = _request_table_rows(page)
-        cells = [[{"text": header, "is_header": True} for header in ("ID", "User", "Request", "Limit change", "Status", "Fulfilled by", "Requested")]]
-        cells.extend([[{"text": str(value)} for value in row] for row in rows])
-        blocks.append({"type": "table", "is_bordered": True, "is_striped": True, "cells": cells})
-    elif status_filter == "pending" and reqs:
-        for req in reqs:
-            blocks.append({
-                "type": "buttons",
-                "buttons": [
-                    {"text": _request_action_label(req), "callback_data": "noop"},
-                    {"text": "✅ Approve", "style": "success", "callback_data": f"reqhist:approve:{req['id']}:{page}"},
-                    {"text": "❌ Decline", "style": "danger", "callback_data": f"reqhist:decline:{req['id']}:{page}"},
-                ],
-            })
-    else:
-        blocks.append({"type": "paragraph", "text": "No requests yet." if status_filter == "all" else "No pending requests."})
-
-    filter_buttons = []
-    if status_filter == "pending":
-        filter_buttons.append({"text": f"All ({users_db.request_count()})", "callback_data": "reqview:all:0"})
-    else:
-        filter_buttons.append({"text": f"Pending ({pending_total})", "callback_data": "reqview:pending:0"})
-    blocks.append({"type": "buttons", "buttons": filter_buttons})
-    nav_buttons = []
-    if page:
-        nav_buttons.append({"text": "◀ Previous page", "callback_data": f"reqview:{status_filter}:{page - 1}"})
-    nav_buttons.append({"text": f"{page + 1}/{total_pages}", "callback_data": "noop"})
-    if page + 1 < total_pages:
-        nav_buttons.append({"text": "Next page ▶", "callback_data": f"reqview:{status_filter}:{page + 1}"})
-    blocks.append({"type": "buttons", "buttons": nav_buttons})
-    blocks.append({"type": "buttons", "buttons": [{"text": "Close", "callback_data": "reqclose"}]})
-    return {"blocks": blocks}, page
+    return request_history_rich_message(users_db, page, status_filter, page_size)
 
 
 async def _show_request_history(bot, chat_id, page=0, status_filter="all", message_id=None):
@@ -572,7 +415,7 @@ async def _create_peer_for(update: Update, target: str, custom_name, message=Non
     if message is None:
         return
     try:
-        clients = wg.list_clients()
+        clients = await asyncio.to_thread(wg.list_clients)
     except Exception as e:
         await message.reply_text(f"API error: {e}")
         return
@@ -600,37 +443,43 @@ async def _create_peer_for(update: Update, target: str, custom_name, message=Non
     else:
         peer_name = generate_peer_name(live_names | db_names)
     try:
-        result = wg.create_client(peer_name)
-    except Exception as e:
-        await message.reply_text(f"API error: {e}")
+        peer_name, client_id = await create_owned_device(
+            wg, users_db, peer_name, target, auto_name=custom_name is None,
+            reserved_names=live_names | db_names,
+        )
+    except DeviceOperationError as exc:
+        await message.reply_text(str(exc))
         return
-    client_id = result.get("clientId")
+    except Exception as exc:
+        await message.reply_text(f"API error: {exc}")
+        return
     try:
-        if client_id:
-            import hashlib
-            hash_name = hashlib.sha256(str(client_id).encode()).hexdigest()[:8]
-            if hash_name.lower() not in (live_names | db_names):
-                try:
-                    wg.rename_client(client_id, hash_name)
-                    peer_name = hash_name
-                except Exception:
-                    pass
-        users_db.add_peer(peer_name.lower(), target, client_id)
-    except Exception:
-        logger.warning("Failed to persist peer %s for %s", peer_name, target)
-    try:
-        config_data, filename = wg.get_client_config(client_id)
-        await message.reply_document(
-            document=BytesIO(config_data),
-            filename=filename,
-            caption=f"✅ Device <b>{html.escape(peer_name)}</b> created for <b>{html.escape(target)}</b>!\n\n{AMNEZIA_LINKS}",
-            parse_mode="HTML",
+        config_data, filename = await asyncio.to_thread(wg.get_client_config, client_id)
+        await _send_private_config(
+            update, message, BytesIO(config_data), filename,
+            f"✅ Device <b>{html.escape(peer_name)}</b> created for <b>{html.escape(target)}</b>!\n\n{AMNEZIA_LINKS}",
         )
     except Exception:
+        logger.exception("Could not deliver config for device %s", client_id)
         await message.reply_text(
-            f"✅ Device <b>{html.escape(peer_name)}</b> created for <b>{html.escape(target)}</b>!",
+            f"Device <b>{html.escape(peer_name)}</b> was created, but its config could not be delivered privately. Open a private chat with the bot and download it there.",
             parse_mode="HTML",
         )
+
+
+async def _send_private_config(update: Update, message, document: BytesIO, filename: str, caption: str) -> None:
+    """Send a private-key-bearing configuration only to the requesting user."""
+    chat = update.effective_chat
+    if chat is not None and chat.type == "private":
+        await message.reply_document(document=document, filename=filename, caption=caption, parse_mode="HTML")
+        return
+    user = update.effective_user
+    if user is None:
+        raise ValueError("No requesting user for private configuration delivery")
+    await message.get_bot().send_document(
+        chat_id=user.id, document=document, filename=filename, caption=caption, parse_mode="HTML",
+    )
+    await message.reply_text("Configuration sent to your private chat with the bot.")
 
 
 async def _show_peer_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str):
@@ -638,7 +487,7 @@ async def _show_peer_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     if user is None:
         return
     try:
-        clients = wg.list_clients()
+        clients = await asyncio.to_thread(wg.list_clients)
     except Exception as e:
         if update.effective_message:
             await update.effective_message.reply_text(f"API error: {e}")
@@ -657,219 +506,39 @@ async def _show_peer_selection(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 def _users_list_view(page=0, status_filter="all"):
-    if status_filter not in {"all", "enabled", "disabled"}:
-        return None
-    if not users_db.list_users():
-        return None
-    users = users_db.list_users(None if status_filter == "all" else status_filter)
-    users.sort(key=lambda user: (user.role != "admin", user.username))
-    page_size = PAGE_SIZE
-    total_pages = max(1, (len(users) + page_size - 1) // page_size)
-    page = max(0, min(page, total_pages - 1))
-    snapshot_names = {str(c.get("name", "")).lower() for c in users_db.list_peer_snapshots()}
-    rows = []
-    filters_row = [
-        InlineKeyboardButton(label, callback_data=f"usersview:{key}:0")
-        for key, label in (("all", "All"), ("enabled", "Enabled"), ("disabled", "Disabled"))
-    ]
-    rows.append(filters_row)
-    start = page * page_size
-    for u in users[start:start + page_size]:
-        peers = users_db.peers_of(u.username)
-        peer_count = sum(1 for name in peers if name in snapshot_names)
-        limit = u.config_limit if u.config_limit >= 0 else "∞"
-        admin_label = " (admin)" if u.role == "admin" else ""
-        label = f"{u.username}{admin_label} {peer_count}/{limit}"
-        if u.status == "disabled":
-            label += " ⛔"
-        rows.append([InlineKeyboardButton(label, callback_data=f"user:{u.username}:{status_filter}:{page}")])
-    nav = []
-    if page:
-        nav.append(InlineKeyboardButton("◀ Previous", callback_data=f"userspage:{status_filter}:{page - 1}"))
-    if total_pages > 1:
-        nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
-    if page + 1 < total_pages:
-        nav.append(InlineKeyboardButton("Next ▶", callback_data=f"userspage:{status_filter}:{page + 1}"))
-    if nav:
-        rows.append(nav)
-    rows.append([InlineKeyboardButton("❌ Close", callback_data="cancel")])
-    title = f"👥 Users · {status_filter.title()} ({len(users)}) · {page + 1}/{total_pages}"
-    if users:
-        title += " — tap to manage:"
-    else:
-        title += f"\nNo {status_filter} users."
-    return title, InlineKeyboardMarkup(rows)
+    return users_list_view(users_db, page, status_filter)
 
 
 def _user_detail_view(username, back_target="menu:users"):
-    u = users_db.get_user(username)
-    if u is None:
-        return None
-    by_name = {
-        str(c.get("name", "")).lower(): c
-        for c in users_db.list_peer_snapshots()
-    }
-    records = users_db.peer_records(u.username)
-    active = [rec for rec in records if rec["name"] in by_name]
-    limit = "∞" if u.config_limit == -1 else str(u.config_limit)
-    head = f"👤 <b>{html.escape(username)}</b> [{u.role}]"
-    if u.status == "disabled":
-        head += " ⛔ DISABLED"
-    lines = [head, f"<b>Limit:</b> {len(active)}/{limit}"]
-    lines.append(f"<b>TG:</b> {u.tg_id}" if u.tg_id not in (None, -1) else "<b>TG:</b> pending")
-    peers_label = f"👥 Devices ({len(active)})"
-    role_label = "⬇ Demote to user" if u.role == "admin" else "⬆ Promote to admin"
-    status_button = InlineKeyboardButton(
-        "▶ Enable" if u.status == "disabled" else "⏸ Disable",
-        callback_data=f"userenable:{username}" if u.status == "disabled" else f"userdisable:{username}",
-    )
-    rows = [
-        [InlineKeyboardButton(peers_label, callback_data=f"upeers:{username}")],
-        [InlineKeyboardButton("📝 Limit", callback_data=f"ulimit:{username}"), InlineKeyboardButton("📜 Requests", callback_data=f"ureqs:{username}")],
-        [InlineKeyboardButton("🗑 Delete", callback_data=f"udel:{username}"), status_button],
-        [InlineKeyboardButton(role_label, callback_data=f"role:{username}")],
-        _back_close_row(back_target),
-    ]
-    return "\n".join(lines), InlineKeyboardMarkup(rows)
-
-
-def _back_close_row(target):
-    return [InlineKeyboardButton("◀ Back", callback_data=target), InlineKeyboardButton("❌ Close", callback_data="cancel")]
+    return user_detail_view(users_db, username, back_target)
 
 
 def _peers_list_view(username):
-    u = users_db.get_user(username)
-    if u is None:
-        return None
-    by_name = {
-        str(c.get("name", "")).lower(): c
-        for c in users_db.list_peer_snapshots()
-    }
-    records = users_db.peer_records(u.username)
-    active = [rec for rec in records if rec["name"] in by_name]
-    limit = "∞" if u.config_limit == -1 else str(u.config_limit)
-    lines = [f"👥 Devices of <b>{html.escape(username)}</b>"]
-    if active:
-        lines[0] += f" ({len(active)}/{limit})"
-        lines.append("Tap a name for details:")
-    else:
-        lines.append("Devices: none")
-    rows = []
-    for rec in active:
-        c = by_name[rec["name"]]
-        hs = c.get("latestHandshakeAt")
-        details = (
-            f"{_dt_short(rec['created_at'], with_year=True)} · ↑{_compact_bytes(c.get('transferRx'))} "
-            f"↓{_compact_bytes(c.get('transferTx'))} · {_handshake_ago(c)} "
-            f"({_dt_short(hs, with_time=True) if hs else 'never'})"
-        )
-        name_budget = max(1, 64 - len(details) - 3)
-        name = rec["name"]
-        short_name = name if len(name) <= name_budget else f"{name[:name_budget - 1]}…"
-        label = f"{short_name} · {details}"
-        rows.append([InlineKeyboardButton(label, callback_data=f"pinfo:{c['id']}")])
-    rows.append(_back_close_row(f"user:{username}"))
-    return "\n".join(lines), InlineKeyboardMarkup(rows)
+    return peers_list_view(users_db, username)
 
 
-def _peer_info_view(client_id, admin=True, back_target=None):
+def _peer_info_view(client_id, admin=True, back_target=None, client=None):
     try:
-        c = wg.get_client(client_id)
+        c = client if client is not None else wg.get_client(client_id)
     except Exception:
         return None
-    snapshot = users_db.get_peer_snapshot(client_id)
-    if snapshot is not None:
-        c = {
-            **c,
-            "latestHandshakeAt": snapshot["latestHandshakeAt"],
-            "transferRx": snapshot["transferRx"],
-            "transferTx": snapshot["transferTx"],
-        }
-    name = str(c.get("name", ""))
-    rec = users_db.get_peer(name)
-    owner = rec["owner"] if rec else None
-    status = "🟢 Enabled" if c.get("enabled") else "🔴 Disabled"
-    ip = c.get("ipv4Address") or "N/A"
-    created = _dt_short(rec["created_at"], with_time=True, with_year=True) if rec else "—"
-    hs = c.get("latestHandshakeAt")
-    parsed_hs = None
-    if hs:
-        try:
-            parsed_hs = datetime.fromisoformat(str(hs).replace("Z", "+00:00"))
-        except ValueError:
-            parsed_hs = None
-    hs_line = f"{_dt_short(hs, with_time=True)} ({_handshake_ago(c)} ago)" if parsed_hs is not None else "never"
-    lines = [f"🔹 <b>{html.escape(name)}</b>"]
-    if owner:
-        lines.append(f"<b>Owner:</b> @{html.escape(owner)}")
-    lines.append(f"<b>Status:</b> {status}")
-    activity = "🟢 Active" if snapshot is not None and snapshot["is_active"] else "🔴 Inactive"
-    lines.append(f"<b>Activity:</b> {activity}")
-    lines.append(f"<b>IP:</b> {html.escape(str(ip))}")
-    lines.append(f"<b>Created:</b> {created}")
-    lines.append(f"<b>Last handshake:</b> {hs_line}")
-    lines.append(
-        f"<b>Traffic total:</b> ↑ Upload {format_bytes(c.get('transferRx'))} · "
-        f"↓ Download {format_bytes(c.get('transferTx'))}"
-    )
-    toggle = "⏸ Disable" if c.get("enabled") else "▶ Enable"
-    rows = [[InlineKeyboardButton("📥 Download configuration", callback_data=f"cfg:{client_id}")]]
-    if owner or admin:
-        rows.append([InlineKeyboardButton("✏️ Rename", callback_data=f"ren:{client_id}:{name[:40]}")])
-    if admin:
-        rows.append([InlineKeyboardButton(toggle, callback_data=f"ptog:{client_id}"), InlineKeyboardButton("🗑 Delete", callback_data=f"del:{client_id}:{name[:40]}")])
-    if back_target is None:
-        back_target = f"upeers:{owner}" if admin and owner else "menu:list"
-    rows.append(_back_close_row(back_target))
-    return "\n".join(lines), InlineKeyboardMarkup(rows)
+    return peer_info_view(users_db, client_id, c, admin, back_target)
 
 
-def _set_user_devices_enabled(username, enable):
-    count = 0
-    try:
-        by_name = {str(c.get("name", "")).lower(): c for c in wg.list_clients()}
-        for name in users_db.peers_of(username):
-            c = by_name.get(name)
-            if c is None:
-                continue
-            if enable:
-                if c.get("enabled") == False:
-                    wg.enable_client(c["id"])
-                    count += 1
-            else:
-                if c.get("enabled"):
-                    wg.disable_client(c["id"])
-                    count += 1
-    except Exception as e:
-        return count, str(e)
-    return count, None
+async def _set_user_devices_enabled(username, enable):
+    return await set_user_devices_enabled(wg, users_db, username, enable)
 
 
-def _delete_user_cascade(username):
+async def _delete_user_cascade(username):
     u = users_db.get_user(username)
     if u is None:
         return "User not found."
-    names = users_db.peers_of(username)
-    deleted = 0
-    err = None
     try:
-        by_name = {str(c.get("name", "")).lower(): c for c in wg.list_clients()}
-        for name in names:
-            c = by_name.get(name)
-            if c is not None:
-                wg.delete_client(c["id"])
-                users_db.remove_peer(name)
-                deleted += 1
-    except Exception as e:
-        err = str(e)
-        for name in names:
-            try:
-                users_db.remove_peer(name)
-            except Exception:
-                pass
+        deleted = await delete_user_devices(wg, users_db, username)
+    except PartialDeletionError as exc:
+        logger.exception("Failed to delete devices for %s", username)
+        return f"Deletion stopped after {exc.deleted} device(s); user and remaining records retained: {html.escape(str(exc))}"
     users_db.remove_user(username)
-    if err:
-        return f"User deleted, but device deletion failed: {err}"
     return f"🗑 User <b>{html.escape(username)}</b> deleted with {deleted} device(s)."
 
 
@@ -901,7 +570,7 @@ async def givemepowers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         limit = user.config_limit if user.config_limit != -1 else "∞"
         try:
-            clients = visible_clients(user, wg.list_clients())
+            clients = visible_clients(user, await asyncio.to_thread(wg.list_clients))
         except Exception as e:
             logger.warning("Failed to list peers for %s: %s", user.username, e)
             text = "Powers already granted ✅"
@@ -1127,7 +796,7 @@ async def userlimit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @require_admin
 async def userlimit_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    username = context.user_data.pop("_ulimit_target", None)
+    username = context.user_data.get("_ulimit_target")
     if username is None:
         await update.message.reply_text("Nothing to change.")
         return ConversationHandler.END
@@ -1136,11 +805,15 @@ async def userlimit_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("Enter a valid integer (-1 = unlimited).")
         return WAITING_FOR_USERLIMIT
+    if n < -1:
+        await update.message.reply_text("Enter a valid integer (-1 = unlimited).")
+        return WAITING_FOR_USERLIMIT
     try:
         users_db.set_limit(username, n)
     except KeyError:
         await update.message.reply_text("User not found.")
         return ConversationHandler.END
+    context.user_data.pop("_ulimit_target", None)
     await update.message.reply_text(f"✅ Limit for <b>{html.escape(username)}</b> set to {n}.", parse_mode="HTML")
     return ConversationHandler.END
 
@@ -1286,7 +959,7 @@ async def rename_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["rename_id"] = parts[1]
     context.user_data["rename_old"] = parts[2] if len(parts) > 2 else parts[1]
     try:
-        peer = wg.get_client(parts[1])
+        peer = await asyncio.to_thread(wg.get_client, parts[1])
         owner = users_db.peer_owner(str(peer.get("name", "")))
     except Exception:
         owner = None
@@ -1322,13 +995,13 @@ async def rename_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client_id = context.user_data.get("rename_id")
     old_display = context.user_data.get("rename_old", client_id)
     try:
-        current = wg.get_client(client_id)
+        current = await asyncio.to_thread(wg.get_client, client_id)
         old_name = str(current.get("name", "")).lower()
         owner = users_db.peer_owner(old_name)
         if not users_db.is_admin(user) and owner != user.username:
             await update.message.reply_text("You can rename only your own configurations.")
             return ConversationHandler.END
-        wg.rename_client(client_id, new_name)
+        await asyncio.to_thread(wg.rename_client, client_id, new_name)
         users_db.rename_peer(old_name, new_name)
         await update.message.reply_text(
             f"✅ <b>{html.escape(old_display)}</b> → <b>{html.escape(new_name)}</b>",
@@ -1391,8 +1064,12 @@ async def adduser_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(parts) >= 2:
         try:
             limit_cand = int(parts[1])
-        except Exception:
-            limit_cand = None
+        except ValueError:
+            await msg.reply_text("Enter a valid integer limit (-1 = unlimited).")
+            return WAITING_FOR_NEWUSER
+        if limit_cand < -1:
+            await msg.reply_text("Enter a valid integer limit (-1 = unlimited).")
+            return WAITING_FOR_NEWUSER
     try:
         user_added = users_db.add_user(uname_cand, tg_id=None, limit=limit_cand)
         limit_out = user_added.config_limit
@@ -1425,8 +1102,11 @@ async def limit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uname = str(context.args[0]).strip().lstrip("@").lower()
     try:
         N = int(context.args[1])
-    except Exception:
+    except ValueError:
         await update.message.reply_text("Usage: /limit <username> <N>")
+        return
+    if N < -1:
+        await update.message.reply_text("Enter a valid integer (-1 = unlimited).")
         return
     try:
         users_db.set_limit(uname, N)
@@ -1441,7 +1121,7 @@ async def deluser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /deluser <username>")
         return
     uname = str(context.args[0]).strip().lstrip("@").lower()
-    await update.message.reply_text(_delete_user_cascade(uname), parse_mode="HTML")
+    await update.message.reply_text(await _delete_user_cascade(uname), parse_mode="HTML")
 
 
 @require_admin
@@ -1459,7 +1139,7 @@ async def disable_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     admin = get_user(update)
     users_db.disable_user(target.username, disabled_by=admin.username if admin else None)
-    disabled, err = _set_user_devices_enabled(target.username, False)
+    disabled, err = await _set_user_devices_enabled(target.username, False)
     if err:
         logger.warning("Failed to disable peers for %s: %s", target.username, err)
         await update.message.reply_text(f"User disabled, but device disable failed: {err}")
@@ -1481,7 +1161,7 @@ async def enable_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Cannot change an admin's enabled status.")
         return
     users_db.enable_user(target.username)
-    enabled, err = _set_user_devices_enabled(target.username, True)
+    enabled, err = await _set_user_devices_enabled(target.username, True)
     if err:
         logger.warning("Failed to enable peers for %s: %s", target.username, err)
         await update.message.reply_text(f"User enabled, but device enable failed: {err}")
@@ -1491,45 +1171,346 @@ async def enable_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Callback handler ──────────────────────────────────────────────────────────
 
-async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _handle_request_decision(query, context, admin: User, action: str, req_id: int, history_page: int | None):
+    """Apply a decision, update admin messages, and notify the requester."""
+    if not users_db.is_admin(admin):
+        await query.edit_message_text("Admins only.")
+        return
+    if action not in {"approve", "decline"}:
+        return
+    req = users_db.get_request(req_id)
+    if req is None or req["status"] != "pending":
+        await query.edit_message_text("Request already processed.")
+        return
+
+    created = None
+    if action == "approve":
+        try:
+            created = users_db.approve_request(req_id, admin.tg_id, admin.username)
+        except (ValueError, KeyError, sqlite3.IntegrityError) as exc:
+            await query.edit_message_text(f"Cannot approve request: {html.escape(str(exc))}")
+            return
+        if created is None:
+            await query.edit_message_text("Request already processed.")
+            return
+    elif not users_db.decide_request(req_id, "declined", admin.tg_id, admin.username):
+        await query.edit_message_text("Request already processed.")
+        return
+
+    if req.get("type", "access") == "limit":
+        if action == "approve":
+            admin_text = f"✅ Request #{req_id} approved by @{admin.username}."
+            user_text = f"✅ Your config limit is now {req['requested_limit']}."
+            result = f"✅ Request #{req_id} approved: @{req['username']} limit → {req['requested_limit']}"
+        else:
+            admin_text = f"❌ Request #{req_id} declined by @{admin.username}."
+            user_text = f"❌ Your limit request was declined by @{admin.username}."
+            result = f"❌ Request #{req_id} declined."
+    elif action == "approve":
+        admin_text = f"✅ Request #{req_id} approved by @{admin.username}: {created.username} registered."
+        user_text = f"✅ You are registered! Your config limit: {created.config_limit}.\nUse /start to begin."
+        result = f"✅ Request #{req_id} approved: {created.username} registered."
+    else:
+        admin_text = f"❌ Request #{req_id} declined by @{admin.username}."
+        user_text = f"❌ Your access request was declined by @{admin.username}."
+        result = f"❌ Request #{req_id} declined."
+
+    try:
+        await _edit_request_copies(context, req, admin_text)
+    except Exception:
+        logger.exception("Failed to update admin copies for request %s", req_id)
+    try:
+        reply_markup = None
+        if action == "approve" and req.get("type", "access") != "limit":
+            reply_markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("📋 Open menu", callback_data="menu:home"),
+            ]])
+        await context.bot.send_message(req["tg_id"], user_text, reply_markup=reply_markup)
+    except Exception:
+        logger.warning("Failed to notify user %s about request %s", req["tg_id"], req_id)
+    if history_page is not None:
+        await _show_request_history(
+            context.bot, query.message.chat_id, history_page, "pending",
+            message_id=query.message.message_id,
+        )
+    else:
+        await query.edit_message_text(result)
+
+async def _authorized_callback_client(query, user, client_id, *, missing, denied="Access denied.", missing_markup=None):
+    """Fetch a device once and enforce ownership before any further API action."""
+    try:
+        client = await asyncio.to_thread(wg.get_client, client_id)
+    except Exception as exc:
+        if missing_markup is None:
+            await query.edit_message_text(missing(exc))
+        else:
+            await query.edit_message_text(missing(exc), reply_markup=missing_markup)
+        return None
+    if not owns_client(user, client):
+        await query.edit_message_text(denied)
+        return None
+    return client
+
+
+async def _handle_device_callback(update, context, user, data):
     query = update.callback_query
-    await query.answer()
-    user = get_user(update)
-    if user is None:
-        _log_unauthorized(update)
-        return
-    data = query.data
-    if data == "cancel":
-        await delete_callback_message(query)
-        return
-    if users_db.is_disabled(user):
-        try:
-            await query.edit_message_text("Your account is disabled. Contact an administrator.")
-        except Exception:
-            pass
-        return
-    context.user_data['_user'] = user
-
-    history_action = False
-    history_page = 0
-    if data.startswith("reqhist:"):
-        history_parts = data.split(":")
-        if len(history_parts) != 4 or history_parts[1] not in {"approve", "decline"}:
-            return
-        try:
-            history_page = int(history_parts[3])
-        except ValueError:
-            return
-        data = f"req:{history_parts[1]}:{history_parts[2]}"
-        history_action = True
-
-    if data == "noop":
-        return
-
-    if data.startswith("role:"):
+    if data in {"create:pickuser", "create:self"} or data.startswith("createfor:"):
         if not users_db.is_admin(user):
             await query.edit_message_text("Admins only.")
             return
+        if data == "create:pickuser":
+            users = users_db.list_users()
+            if not users:
+                await query.edit_message_text("No registered users.")
+                return
+            rows = []
+            for u in users:
+                lim = u.config_limit if u.config_limit != -1 else "∞"
+                rows.append([InlineKeyboardButton(
+                    f"{u.username} ({u.role}, limit {lim})", callback_data=f"createfor:{u.username}",
+                )])
+            rows.append([InlineKeyboardButton("Cancel", callback_data="cancel")])
+            await query.edit_message_text("Create device for:", reply_markup=InlineKeyboardMarkup(rows))
+            return
+        target = user.username if data == "create:self" else data.split(":", 1)[1]
+        if data.startswith("createfor:") and not users_db.user_exists(target):
+            await query.edit_message_text("User not found.")
+            return
+        await query.edit_message_text(
+            "Creating a configuration for you…" if data == "create:self" else f"Creating a device for {target}..."
+        )
+        await _create_peer_for(update, target, None, message=query.message)
+        return
+
+    if data.startswith("pinfo:"):
+        parts = data.split(":")
+        client_id = parts[1]
+        back_target = None
+        if len(parts) == 4 and parts[2] in {"all", "active", "enabled", "disabled"}:
+            try:
+                back_target = f"dev:{parts[2]}:{int(parts[3])}"
+            except ValueError:
+                pass
+        missing_markup = InlineKeyboardMarkup([_back_close_row(
+            back_target or ("menu:users" if users_db.is_admin(user) else "menu:list")
+        )])
+        client = await _authorized_callback_client(
+            query, user, client_id, missing=lambda exc: "Device not found.",
+            denied="You can view only your own configurations.", missing_markup=missing_markup,
+        )
+        if client is None:
+            return
+        view = _peer_info_view(client_id, admin=users_db.is_admin(user), back_target=back_target, client=client)
+        if view is None:
+            await query.edit_message_text("Device not found.", reply_markup=missing_markup)
+            return
+        text, kb = view
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        return
+
+    if data.startswith("ptog:"):
+        if not users_db.is_admin(user):
+            await query.edit_message_text("Admins only.")
+            return
+        client_id = data.split(":", 1)[1]
+        try:
+            c = await asyncio.to_thread(wg.get_client, client_id)
+        except Exception:
+            await query.edit_message_text(
+                "Device not found.", reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
+            )
+            return
+        owner = users_db.peer_owner(str(c.get("name", "")))
+        try:
+            if c.get("enabled"):
+                await asyncio.to_thread(wg.disable_client, client_id)
+            else:
+                await asyncio.to_thread(wg.enable_client, client_id)
+        except Exception as exc:
+            await query.edit_message_text(f"API error: {exc}")
+            return
+        if owner is None:
+            await query.edit_message_text(
+                "✅ Device updated.", reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
+            )
+            return
+        try:
+            refreshed = await asyncio.to_thread(wg.get_client, client_id)
+        except Exception:
+            refreshed = None
+        view = _peer_info_view(client_id, client=refreshed) if refreshed is not None else None
+        if view is None:
+            await query.edit_message_text(
+                "Device not found.", reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
+            )
+            return
+        text, kb = view
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            pass
+        return
+
+    if data.startswith("dev:"):
+        try:
+            _, filter_name, page_text = data.split(":")
+            page = int(page_text)
+            if filter_name not in {"all", "active", "enabled", "disabled"}:
+                return
+            clients = visible_clients(user, users_db.list_peer_snapshots())
+            markup, filtered, page, pages = _device_list_markup(clients, user, filter_name, page)
+            title = _device_list_title(filter_name, filtered, page, pages, clients, user)
+            await query.edit_message_text(
+                title if filtered else f"{title}\nNo {filter_name} devices.",
+                parse_mode="HTML", reply_markup=markup,
+            )
+        except Exception as exc:
+            if not _is_message_not_modified_error(exc):
+                await query.edit_message_text(f"API error: {exc}")
+        return
+
+    if data.startswith("pg:"):
+        try:
+            _, act, page_str = data.split(":")
+            page = int(page_str)
+        except Exception:
+            return
+        try:
+            clients = await asyncio.to_thread(wg.list_clients)
+        except Exception as exc:
+            await query.edit_message_text(f"API error: {exc}")
+            return
+        clients = visible_clients(user, clients)
+        q = context.user_data.get(f"{act}_filter", "")
+        filtered = filter_clients(clients, q)
+        if not filtered:
+            await query.edit_message_text("No devices found.")
+            return
+        title = PEER_SELECT_TITLE[act]
+        if q:
+            title += f"\n🔍 <i>{html.escape(q)}</i>"
+        await query.edit_message_text(
+            title, reply_markup=peers_keyboard(filtered, act, page), parse_mode="HTML",
+        )
+        return
+
+    if data.startswith("cfg:"):
+        client_id = data[4:]
+        client = await _authorized_callback_client(
+            query, user, client_id,
+            missing=(lambda exc: f"API error: {exc}") if users_db.is_admin(user) else (lambda exc: "Configuration not found."),
+            denied="You can access only your own configurations.",
+        )
+        if client is None:
+            return
+        try:
+            config_data, filename = await asyncio.to_thread(wg.get_client_config, client_id)
+            await _send_private_config(update, query.message, BytesIO(config_data), filename, AMNEZIA_LINKS)
+            await query.edit_message_text("Configuration delivered privately.")
+        except Exception as exc:
+            logger.warning("Configuration delivery failed for %s: %s", client_id, exc)
+            await query.edit_message_text("Could not deliver the config. Start a private chat with the bot and retry.")
+        return
+
+    if data.startswith("del:"):
+        parts = data.split(":", 2)
+        client_id = parts[1]
+        name = parts[2] if len(parts) > 2 else client_id
+        client = await _authorized_callback_client(
+            query, user, client_id, missing=lambda exc: f"API error: {exc}",
+        )
+        if client is None:
+            return
+        await query.edit_message_text(
+            f"Delete device <b>{html.escape(name)}</b>?",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Yes, delete", callback_data=f"delconfirm:{client_id}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="cancel"),
+            ]]), parse_mode="HTML",
+        )
+        return
+
+    if data.startswith("delconfirm:"):
+        client_id = data[11:]
+        client = await _authorized_callback_client(
+            query, user, client_id, missing=lambda exc: f"API error: {exc}",
+        )
+        if client is None:
+            return
+        name = str(client.get("name", "")).lower()
+        owner = users_db.peer_owner(name)
+        try:
+            await asyncio.to_thread(wg.delete_client, client_id)
+            users_db.remove_peer(name)
+            if owner and users_db.is_admin(user):
+                await query.edit_message_text(
+                    "✅ Device deleted.",
+                    reply_markup=InlineKeyboardMarkup([_back_close_row(f"upeers:{owner}")]),
+                )
+            else:
+                await query.edit_message_text("✅ Device deleted.")
+        except Exception as exc:
+            await query.edit_message_text(f"API error: {exc}")
+
+
+async def _handle_request_callback(query, context, user, data):
+    if not users_db.is_admin(user):
+        await query.edit_message_text("Admins only.")
+        return
+    if data.startswith(("reqpage:", "reqview:")):
+        parts = data.split(":")
+        if parts[0] == "reqpage" and len(parts) == 2:
+            status_filter, page_text = "all", parts[1]
+        elif len(parts) == 3 and parts[1] in {"all", "pending"}:
+            status_filter, page_text = parts[1], parts[2]
+        else:
+            return
+        try:
+            page = int(page_text)
+        except ValueError:
+            return
+        await _show_request_history(
+            context.bot, query.message.chat_id, page, status_filter,
+            message_id=query.message.message_id,
+        )
+        return
+    if data == "reqclose":
+        await delete_callback_message(query)
+        return
+    history_page = None
+    if data.startswith("reqhist:"):
+        parts = data.split(":")
+        if len(parts) != 4 or parts[1] not in {"approve", "decline"}:
+            return
+        try:
+            history_page = int(parts[3])
+        except ValueError:
+            return
+        data = f"req:{parts[1]}:{parts[2]}"
+    parts = data.split(":")
+    if len(parts) != 3:
+        return
+    try:
+        req_id = int(parts[2])
+    except ValueError:
+        return
+    await _handle_request_decision(query, context, user, parts[1], req_id, history_page)
+
+
+async def _show_users_callback_page(query, page, status_filter):
+    view = _users_list_view(page, status_filter)
+    if view is None:
+        await query.edit_message_text("No registered users.")
+        return
+    text, kb = view
+    await _edit_callback_message_if_changed(query, text, reply_markup=kb)
+
+
+async def _handle_user_callback(query, user, data):
+    if not users_db.is_admin(user):
+        await query.edit_message_text("Admins only.")
+        return
+    if data.startswith("role:"):
         target_name = data.split(":", 1)[1]
         target = users_db.get_user(target_name)
         if target is None:
@@ -1545,256 +1526,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(view[0], parse_mode="HTML", reply_markup=view[1])
         return
 
-    if data.startswith("reqpage:") or data.startswith("reqview:"):
-        if not users_db.is_admin(user):
-            await query.edit_message_text("Admins only.")
-            return
-        parts = data.split(":")
-        if parts[0] == "reqpage" and len(parts) == 2:
-            status_filter, page_text = "all", parts[1]
-        elif len(parts) == 3 and parts[1] in {"all", "pending"}:
-            status_filter, page_text = parts[1], parts[2]
-        else:
-            return
-        try:
-            page = int(page_text)
-        except ValueError:
-            return
-        await _show_request_history(
-            context.bot,
-            query.message.chat_id,
-            page,
-            status_filter,
-            message_id=query.message.message_id,
-        )
-        return
-
-    if data == "reqclose":
-        if not users_db.is_admin(user):
-            await query.edit_message_text("Admins only.")
-            return
-        await delete_callback_message(query)
-        return
-
-    if data == "create:pickuser":
-        if not users_db.is_admin(user):
-            await query.edit_message_text("Admins only.")
-            return
-        users = users_db.list_users()
-        if not users:
-            await query.edit_message_text("No registered users.")
-            return
-        rows = []
-        for u in users:
-            lim = u.config_limit if u.config_limit != -1 else "∞"
-            rows.append([InlineKeyboardButton(
-                f"{u.username} ({u.role}, limit {lim})",
-                callback_data=f"createfor:{u.username}",
-            )])
-        rows.append([InlineKeyboardButton("Cancel", callback_data="cancel")])
-        await query.edit_message_text("Create device for:", reply_markup=InlineKeyboardMarkup(rows))
-        return
-
-    if data == "create:self":
-        if not users_db.is_admin(user):
-            await query.edit_message_text("Admins only.")
-            return
-        await query.edit_message_text("Creating a configuration for you…")
-        await _create_peer_for(update, user.username, None, message=query.message)
-        return
-
-    if data.startswith("createfor:"):
-        if not users_db.is_admin(user):
-            await query.edit_message_text("Admins only.")
-            return
-        target = data.split(":", 1)[1]
-        if not users_db.user_exists(target):
-            await query.edit_message_text("User not found.")
-            return
-        await query.edit_message_text(f"Creating a device for {target}...")
-        await _create_peer_for(update, target, None, message=query.message)
-        return
-
-    if data.startswith("req:"):
-        if not users_db.is_admin(user):
-            await query.edit_message_text("Admins only.")
-            return
-        parts = data.split(":")
-        action = parts[1]
-        try:
-            req_id = int(parts[2])
-        except Exception:
-            return
-        req = users_db.get_request(req_id)
-        if req is None or req["status"] != "pending":
-            await query.edit_message_text("Request already processed.")
-            return
-        if action not in ("approve", "decline"):
-            return
-
-        async def finish_request_action(result_text):
-            if history_action:
-                await _show_request_history(
-                    context.bot,
-                    query.message.chat_id,
-                    history_page,
-                    "pending",
-                    message_id=query.message.message_id,
-                )
-            else:
-                await query.edit_message_text(result_text)
-
-        decision = "approved" if action == "approve" else "declined"
-        if not users_db.decide_request(req_id, decision, user.tg_id, user.username):
-            await query.edit_message_text("Request already processed.")
-            return
-        if req.get("type", "access") == "limit":
-            if action == "approve":
-                if not req["username"]:
-                    users_db.decide_request(req_id, "approved", user.tg_id, user.username)
-                    await query.edit_message_text("Request invalid (no username).")
-                    return
-                try:
-                    users_db.set_limit(req["username"], req["requested_limit"])
-                except KeyError:
-                    users_db.decide_request(req_id, "approved", user.tg_id, user.username)
-                    await query.edit_message_text("User no longer exists (request resolved).")
-                    return
-                users_db.decide_request(req_id, "approved", user.tg_id, user.username)
-                await _edit_request_copies(context, req, f"✅ Request #{req_id} approved by @{user.username}.")
-                try:
-                    await context.bot.send_message(
-                        req["tg_id"],
-                        f"✅ Your config limit is now {req['requested_limit']}.",
-                    )
-                except Exception:
-                    logger.warning("Failed to notify user %s about limit approval", req["tg_id"])
-                await finish_request_action(
-                    f"✅ Request #{req_id} approved: @{req['username']} limit → {req['requested_limit']}"
-                )
-                return
-            if action == "decline":
-                users_db.decide_request(req_id, "declined", user.tg_id, user.username)
-                await _edit_request_copies(context, req, f"❌ Request #{req_id} declined by @{user.username}.")
-                try:
-                    await context.bot.send_message(
-                        req["tg_id"],
-                        f"❌ Your limit request was declined by @{user.username}.",
-                    )
-                except Exception:
-                    logger.warning("Failed to notify user %s about limit decline", req["tg_id"])
-                await finish_request_action(f"❌ Request #{req_id} declined.")
-                return
-        if action == "approve":
-            uname = req["username"] or f"user{req['tg_id']}"
-            try:
-                created = users_db.add_user(uname, tg_id=req["tg_id"])
-            except ValueError:
-                users_db.decide_request(req_id, "approved", user.tg_id, user.username)
-                await query.edit_message_text("User already exists (request resolved).")
-                return
-            users_db.decide_request(req_id, "approved", user.tg_id, user.username)
-            await _edit_request_copies(context, req, f"✅ Request #{req_id} approved by @{user.username}: {created.username} registered.")
-            try:
-                await context.bot.send_message(
-                    req["tg_id"],
-                    f"✅ You are registered! Your config limit: {created.config_limit}.\nUse /start to begin.",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("📋 Open menu", callback_data="menu:home"),
-                    ]]),
-                )
-            except Exception:
-                logger.warning("Failed to notify user %s about approval", req["tg_id"])
-            await finish_request_action(f"✅ Request #{req_id} approved: {created.username} registered.")
-            return
-        if action == "decline":
-            users_db.decide_request(req_id, "declined", user.tg_id, user.username)
-            await _edit_request_copies(context, req, f"❌ Request #{req_id} declined by @{user.username}.")
-            try:
-                await context.bot.send_message(
-                    req["tg_id"],
-                    f"❌ Your access request was declined by @{user.username}.",
-                )
-            except Exception:
-                logger.warning("Failed to notify user %s about decline", req["tg_id"])
-            await finish_request_action(f"❌ Request #{req_id} declined.")
-            return
-        return
-
-    if data.startswith("pinfo:"):
-        parts = data.split(":")
-        client_id = parts[1]
-        back_target = None
-        if len(parts) == 4 and parts[2] in {"all", "active", "enabled", "disabled"}:
-            try:
-                back_target = f"dev:{parts[2]}:{int(parts[3])}"
-            except ValueError:
-                pass
-        try:
-            current_peer = wg.get_client(client_id)
-            owner = users_db.peer_owner(str(current_peer.get("name", "")))
-        except Exception:
-            owner = None
-        if not users_db.is_admin(user) and owner != user.username:
-            await query.edit_message_text("You can view only your own configurations.")
-            return
-        view = _peer_info_view(client_id, admin=users_db.is_admin(user), back_target=back_target)
-        if view is None:
-            await query.edit_message_text(
-                "Device not found.",
-                reply_markup=InlineKeyboardMarkup([_back_close_row(back_target or ("menu:users" if users_db.is_admin(user) else "menu:list"))]),
-            )
-            return
-        text, kb = view
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
-        return
-
-    if data.startswith("ptog:"):
-        if not users_db.is_admin(user):
-            await query.edit_message_text("Admins only.")
-            return
-        client_id = data.split(":", 1)[1]
-        try:
-            c = wg.get_client(client_id)
-        except Exception:
-            await query.edit_message_text(
-                "Device not found.",
-                reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
-            )
-            return
-        owner = users_db.peer_owner(str(c.get("name", "")))
-        try:
-            if c.get("enabled"):
-                wg.disable_client(client_id)
-            else:
-                wg.enable_client(client_id)
-        except Exception as e:
-            await query.edit_message_text(f"API error: {e}")
-            return
-        if owner is None:
-            await query.edit_message_text(
-                "✅ Device updated.",
-                reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
-            )
-            return
-        view = _peer_info_view(client_id)
-        if view is None:
-            await query.edit_message_text(
-                "Device not found.",
-                reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
-            )
-            return
-        text, kb = view
-        try:
-            await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
-        except Exception:
-            pass
-        return
-
     if data.startswith("ureqs:"):
-        if not users_db.is_admin(user):
-            await query.edit_message_text("Admins only.")
-            return
         username = data.split(":", 1)[1]
         target = users_db.get_user(username)
         if target is None:
@@ -1802,15 +1534,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         tg = target.tg_id if target.tg_id not in (None, -1) else None
         reqs = users_db.list_requests(limit=10, tg_id=tg, username=username)
-        back_kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("◀ Back", callback_data=f"user:{username}"),
-            InlineKeyboardButton("❌ Close", callback_data="cancel"),
-        ]])
+        back_kb = InlineKeyboardMarkup([_back_close_row(f"user:{username}")])
         if not reqs:
             await query.edit_message_text(
                 f"📜 Requests of <b>{html.escape(username)}</b>: none yet.",
-                parse_mode="HTML",
-                reply_markup=back_kb,
+                parse_mode="HTML", reply_markup=back_kb,
             )
             return
         lines = [f"📜 Requests of <b>{html.escape(username)}</b> (last {len(reqs)}):"]
@@ -1819,9 +1547,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("upeers:"):
-        if not users_db.is_admin(user):
-            await query.edit_message_text("Admins only.")
-            return
         username = data.split(":", 1)[1]
         view = _peers_list_view(username)
         if view is None:
@@ -1832,9 +1557,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("usersview:"):
-        if not users_db.is_admin(user):
-            await query.edit_message_text("Admins only.")
-            return
         parts = data.split(":")
         if len(parts) != 3 or parts[1] not in {"all", "enabled", "disabled"}:
             return
@@ -1842,18 +1564,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             page = int(parts[2])
         except ValueError:
             return
-        view = _users_list_view(page, parts[1])
-        if view is None:
-            await query.edit_message_text("No registered users.")
-            return
-        text, kb = view
-        await _edit_callback_message_if_changed(query, text, reply_markup=kb)
+        await _show_users_callback_page(query, page, parts[1])
         return
 
     if data.startswith("userspage:"):
-        if not users_db.is_admin(user):
-            await query.edit_message_text("Admins only.")
-            return
         parts = data.split(":")
         try:
             if len(parts) == 2:
@@ -1864,18 +1578,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
         except ValueError:
             return
-        view = _users_list_view(page, status_filter)
-        if view is None:
-            await query.edit_message_text("No registered users.")
-            return
-        text, kb = view
-        await _edit_callback_message_if_changed(query, text, reply_markup=kb)
+        await _show_users_callback_page(query, page, status_filter)
         return
 
     if data.startswith("user:"):
-        if not users_db.is_admin(user):
-            await query.edit_message_text("Admins only.")
-            return
         parts = data.split(":")
         if len(parts) not in (2, 3, 4):
             return
@@ -1900,9 +1606,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("udel:"):
-        if not users_db.is_admin(user):
-            await query.edit_message_text("Admins only.")
-            return
         username = data.split(":", 1)[1]
         if users_db.get_user(username) is None:
             await query.edit_message_text("User not found.")
@@ -1918,66 +1621,76 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("udelconfirm:"):
-        if not users_db.is_admin(user):
-            await query.edit_message_text("Admins only.")
-            return
         username = data.split(":", 1)[1]
-        msg = _delete_user_cascade(username)
+        msg = await _delete_user_cascade(username)
         await query.edit_message_text(
-            msg,
-            parse_mode="HTML",
+            msg, parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
         )
         return
 
-    if data.startswith("userdisable:"):
-        if not users_db.is_admin(user):
-            await query.edit_message_text("Admins only.")
-            return
+    if data.startswith(("userdisable:", "userenable:")):
+        enabling = data.startswith("userenable:")
         username = data.split(":", 1)[1]
         target = users_db.get_user(username)
         if target is None:
             await query.edit_message_text("User not found.")
             return
         if target.role == "admin":
-            await query.edit_message_text("Cannot disable an admin.")
+            await query.edit_message_text(
+                "Cannot change an admin's enabled status." if enabling else "Cannot disable an admin."
+            )
             return
-        users_db.disable_user(username, disabled_by=user.username)
-        count, err = _set_user_devices_enabled(username, False)
-        if err:
-            msg = f"User disabled, but device disable failed: {err}"
+        if enabling:
+            users_db.enable_user(username)
         else:
-            msg = f"⏸ User <b>{html.escape(username)}</b> disabled; {count} device(s) disabled."
+            users_db.disable_user(username, disabled_by=user.username)
+        count, err = await _set_user_devices_enabled(username, enabling)
+        if err:
+            msg = f"User {'enabled' if enabling else 'disabled'}, but device {'enable' if enabling else 'disable'} failed: {err}"
+        else:
+            msg = f"{'▶' if enabling else '⏸'} User <b>{html.escape(username)}</b> {'enabled' if enabling else 'disabled'}; {count} device(s) {'enabled' if enabling else 'disabled'}."
         await query.edit_message_text(
-            msg,
-            parse_mode="HTML",
+            msg, parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
         )
+
+
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = get_user(update)
+    if user is None:
+        _log_unauthorized(update)
+        return
+    data = query.data
+    if data == "cancel":
+        await delete_callback_message(query)
+        return
+    if users_db.is_disabled(user):
+        try:
+            await query.edit_message_text("Your account is disabled. Contact an administrator.")
+        except Exception:
+            pass
+        return
+    context.user_data['_user'] = user
+
+    if data == "noop":
         return
 
-    if data.startswith("userenable:"):
-        if not users_db.is_admin(user):
-            await query.edit_message_text("Admins only.")
-            return
-        username = data.split(":", 1)[1]
-        target = users_db.get_user(username)
-        if target is None:
-            await query.edit_message_text("User not found.")
-            return
-        if target.role == "admin":
-            await query.edit_message_text("Cannot change an admin's enabled status.")
-            return
-        users_db.enable_user(username)
-        count, err = _set_user_devices_enabled(username, True)
-        if err:
-            msg = f"User enabled, but device enable failed: {err}"
-        else:
-            msg = f"▶ User <b>{html.escape(username)}</b> enabled; {count} device(s) enabled."
-        await query.edit_message_text(
-            msg,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
-        )
+    if data.startswith(("reqhist:", "req:", "reqpage:", "reqview:")) or data == "reqclose":
+        await _handle_request_callback(query, context, user, data)
+        return
+
+    if data.startswith(("role:", "ureqs:", "upeers:", "usersview:", "userspage:",
+                        "user:", "udel:", "udelconfirm:", "userdisable:", "userenable:")):
+        await _handle_user_callback(query, user, data)
+        return
+
+    if data in {"create:pickuser", "create:self"} or data.startswith(
+        ("createfor:", "pinfo:", "ptog:", "dev:", "pg:", "cfg:", "del:", "delconfirm:")
+    ):
+        await _handle_device_callback(update, context, user, data)
         return
 
     # ── Inline menu ──
@@ -2034,133 +1747,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    if data.startswith("dev:"):
-        try:
-            _, filter_name, page_text = data.split(":")
-            page = int(page_text)
-            if filter_name not in {"all", "active", "enabled", "disabled"}:
-                return
-            clients = visible_clients(user, users_db.list_peer_snapshots())
-            markup, filtered, page, pages = _device_list_markup(clients, user, filter_name, page)
-            title = _device_list_title(filter_name, filtered, page, pages, clients, user)
-            await query.edit_message_text(
-                title if filtered else f"{title}\nNo {filter_name} devices.",
-                parse_mode="HTML",
-                reply_markup=markup,
-            )
-        except Exception as e:
-            if not _is_message_not_modified_error(e):
-                await query.edit_message_text(f"API error: {e}")
-        return
-
-    # ── Pagination ──
-    if data.startswith("pg:"):
-        try:
-            _, act, page_str = data.split(":")
-            page = int(page_str)
-        except Exception:
-            return
-        try:
-            clients = wg.list_clients()
-        except Exception as e:
-            await query.edit_message_text(f"API error: {e}")
-            return
-        clients = visible_clients(user, clients)
-        q = context.user_data.get(f"{act}_filter", "")
-        filtered = filter_clients(clients, q)
-        if not filtered:
-            await query.edit_message_text("No devices found.")
-            return
-        title = PEER_SELECT_TITLE[act]
-        if q:
-            title += f"\n🔍 <i>{html.escape(q)}</i>"
-        await query.edit_message_text(
-            title,
-            reply_markup=peers_keyboard(filtered, act, page),
-            parse_mode="HTML",
-        )
-        return
-
-    # ── Config download ──
-    if data.startswith("cfg:"):
-        if not users_db.is_admin(user):
-            try:
-                selected = wg.get_client(data.split(":", 1)[1])
-                if users_db.peer_owner(str(selected.get("name", ""))) != user.username:
-                    await query.edit_message_text("You can access only your own configurations.")
-                    return
-            except Exception:
-                await query.edit_message_text("Configuration not found.")
-                return
-        client_id = data[4:]
-        try:
-            client = wg.get_client(client_id)
-        except Exception as e:
-            await query.edit_message_text(f"API error: {e}")
-            return
-        if not owns_client(user, client):
-            await query.edit_message_text("Access denied.")
-            return
-        try:
-            config_data, filename = wg.get_client_config(client_id)
-            await query.edit_message_text("Here is your config:")
-            await query.message.reply_document(
-                document=BytesIO(config_data),
-                filename=filename,
-                caption=AMNEZIA_LINKS,
-                parse_mode="HTML",
-            )
-        except Exception as e:
-            await query.edit_message_text(f"API error: {e}")
-        return
-
-    # ── Delete ──
-    if data.startswith("del:"):
-        parts = data.split(":", 2)
-        client_id = parts[1]
-        name = parts[2] if len(parts) > 2 else client_id
-        try:
-            client = wg.get_client(client_id)
-        except Exception as e:
-            await query.edit_message_text(f"API error: {e}")
-            return
-        if not owns_client(user, client):
-            await query.edit_message_text("Access denied.")
-            return
-        await query.edit_message_text(
-            f"Delete device <b>{html.escape(name)}</b>?",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Yes, delete", callback_data=f"delconfirm:{client_id}"),
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel"),
-            ]]),
-            parse_mode="HTML",
-        )
-        return
-
-    if data.startswith("delconfirm:"):
-        client_id = data[11:]
-        try:
-            client = wg.get_client(client_id)
-        except Exception as e:
-            await query.edit_message_text(f"API error: {e}")
-            return
-        if not owns_client(user, client):
-            await query.edit_message_text("Access denied.")
-            return
-        owner = users_db.peer_owner(str(client.get("name", "")).lower())
-        try:
-            wg.delete_client(client_id)
-            users_db.remove_peer(str(client.get("name", "")).lower())
-            if owner and users_db.is_admin(user):
-                await query.edit_message_text(
-                    "✅ Device deleted.",
-                    reply_markup=InlineKeyboardMarkup([_back_close_row(f"upeers:{owner}")]),
-                )
-            else:
-                await query.edit_message_text("✅ Device deleted.")
-        except Exception as e:
-            await query.edit_message_text(f"API error: {e}")
-        return
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -2240,8 +1826,8 @@ def main():
     app.add_handler(CommandHandler("enable", enable_cmd))
     app.add_handler(CallbackQueryHandler(on_callback))
 
-    admin_env = sorted(list(_parse_env_set("ADMIN_USERNAMES")))
-    logger.info("Bot started, admins: %s, users db: %s", admin_env, os.environ.get("USERS_DB_PATH", "users.db"))
+    admins = [user.username for user in users_db.list_users() if users_db.is_admin(user)]
+    logger.info("Bot started, admins: %s, users db: %s", admins, os.environ.get("USERS_DB_PATH", "users.db"))
     app.run_polling()
 
 
