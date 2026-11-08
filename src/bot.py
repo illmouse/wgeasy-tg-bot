@@ -357,9 +357,8 @@ def _format_request_line(r):
         who = f"id {r['tg_id']}"
     line = f"#{r['id']} {status_icon} {type_icon} {who}"
     if r.get("type") == "limit" and r.get("requested_limit") is not None:
-        previous = _display_limit(r.get("previous_limit"))
         requested = _display_limit(r.get("requested_limit"))
-        line += f" · {previous} → {requested}"
+        line += f" · → {requested}"
     line += f" · {_dt_short(r.get('requested_at'), with_time=True)}"
     if r.get("status") != "pending" and r.get("admin_username"):
         line += f" · by @{r['admin_username']}"
@@ -380,8 +379,8 @@ def _request_action_label(r):
     else:
         who = str(r["tg_id"])
     label = f"#{r['id']} {'📈' if r.get('type') == 'limit' else '🔑'} {who}"
-    if r.get("type") == "limit":
-        label += f" {_display_limit(r.get('previous_limit'))} → {_display_limit(r.get('requested_limit'))}"
+    if r.get("type") == "limit" and r.get("requested_limit") is not None:
+        label += f" → {_display_limit(r.get('requested_limit'))}"
     return label[:60]
 
 
@@ -438,8 +437,9 @@ def _request_table_rows(page=0, status_filter="all"):
             f"#{r['id']}",
             r.get("username") or str(r["tg_id"]),
             "Limit change" if r.get("type") == "limit" else "Access",
-            f"{_display_limit(r.get('previous_limit'))} → {_display_limit(r.get('requested_limit'))}" if r.get("type") == "limit" else "—",
+            f"→ {_display_limit(r.get('requested_limit'))}" if r.get("type") == "limit" and r.get("requested_limit") is not None else "—",
             r["status"],
+            f"@{r['admin_username']}" if r.get("admin_username") else "—",
             _dt_short(r.get("requested_at"), True),
         ]
         for r in reqs
@@ -454,7 +454,7 @@ async def _send_request_history_table(bot, chat_id, page=0, status_filter="all")
         return
     pending_total = users_db.request_count("pending")
     table_title = f"Request history · Pending ({pending_total})"
-    headers = ["ID", "User", "Request", "Limit change", "Status", "Requested"]
+    headers = ["ID", "User", "Request", "Limit change", "Status", "Fulfilled by", "Requested"]
     rows = _request_table_rows(page)
     fallback = "\n".join(" | ".join(str(cell) for cell in row) for row in rows)
     await _send_table_or_text(bot, chat_id, table_title, headers, rows, fallback)
@@ -474,7 +474,7 @@ def _request_history_rich_message(page=0, status_filter="all", page_size=10):
 
     if status_filter == "all" and reqs:
         rows = _request_table_rows(page)
-        cells = [[{"text": header, "is_header": True} for header in ("ID", "User", "Request", "Limit change", "Status", "Requested")]]
+        cells = [[{"text": header, "is_header": True} for header in ("ID", "User", "Request", "Limit change", "Status", "Fulfilled by", "Requested")]]
         cells.extend([[{"text": str(value)} for value in row] for row in rows])
         blocks.append({"type": "table", "is_bordered": True, "is_striped": True, "cells": cells})
     elif status_filter == "pending" and reqs:
@@ -592,7 +592,7 @@ async def _create_peer_for(update: Update, target: str, custom_name, message=Non
             return
         if custom_name.lower() in (live_names | db_names):
             await message.reply_text(
-                f"A peer named <b>{html.escape(custom_name)}</b> already exists. Choose another name.",
+                f"A device named <b>{html.escape(custom_name)}</b> already exists. Choose another name.",
                 parse_mode="HTML",
             )
             return
@@ -623,12 +623,12 @@ async def _create_peer_for(update: Update, target: str, custom_name, message=Non
         await message.reply_document(
             document=BytesIO(config_data),
             filename=filename,
-            caption=f"✅ Peer <b>{html.escape(peer_name)}</b> created for <b>{html.escape(target)}</b>!\n\n{AMNEZIA_LINKS}",
+            caption=f"✅ Device <b>{html.escape(peer_name)}</b> created for <b>{html.escape(target)}</b>!\n\n{AMNEZIA_LINKS}",
             parse_mode="HTML",
         )
     except Exception:
         await message.reply_text(
-            f"✅ Peer <b>{html.escape(peer_name)}</b> created for <b>{html.escape(target)}</b>!",
+            f"✅ Device <b>{html.escape(peer_name)}</b> created for <b>{html.escape(target)}</b>!",
             parse_mode="HTML",
         )
 
@@ -646,7 +646,7 @@ async def _show_peer_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     clients = visible_clients(user, clients)
     if not clients:
         if update.effective_message:
-            await update.effective_message.reply_text("No peers found.")
+            await update.effective_message.reply_text("No devices found.")
         return
     context.user_data[f"{action}_filter"] = ""
     if update.effective_message:
@@ -748,12 +748,12 @@ def _peers_list_view(username):
     records = users_db.peer_records(u.username)
     active = [rec for rec in records if rec["name"] in by_name]
     limit = "∞" if u.config_limit == -1 else str(u.config_limit)
-    lines = [f"👥 Peers of <b>{html.escape(username)}</b>"]
+    lines = [f"👥 Devices of <b>{html.escape(username)}</b>"]
     if active:
         lines[0] += f" ({len(active)}/{limit})"
         lines.append("Tap a name for details:")
     else:
-        lines.append("Peers: none")
+        lines.append("Devices: none")
     rows = []
     for rec in active:
         c = by_name[rec["name"]]
@@ -869,8 +869,8 @@ def _delete_user_cascade(username):
                 pass
     users_db.remove_user(username)
     if err:
-        return f"User deleted, but peer deletion failed: {err}"
-    return f"🗑 User <b>{html.escape(username)}</b> deleted with {deleted} peer(s)."
+        return f"User deleted, but device deletion failed: {err}"
+    return f"🗑 User <b>{html.escape(username)}</b> deleted with {deleted} device(s)."
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -1056,7 +1056,7 @@ async def create_peer_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
         await _create_peer_for(update, target.username, None)
         return ConversationHandler.END
-    await update.effective_message.reply_text("Create peer:", reply_markup=CREATE_MENU)
+    await update.effective_message.reply_text("Create device:", reply_markup=CREATE_MENU)
     return ConversationHandler.END
 
 
@@ -1592,7 +1592,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_data=f"createfor:{u.username}",
             )])
         rows.append([InlineKeyboardButton("Cancel", callback_data="cancel")])
-        await query.edit_message_text("Create peer for:", reply_markup=InlineKeyboardMarkup(rows))
+        await query.edit_message_text("Create device for:", reply_markup=InlineKeyboardMarkup(rows))
         return
 
     if data == "create:self":
@@ -1611,7 +1611,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not users_db.user_exists(target):
             await query.edit_message_text("User not found.")
             return
-        await query.edit_message_text(f"Creating a peer for {target}...")
+        await query.edit_message_text(f"Creating a device for {target}...")
         await _create_peer_for(update, target, None, message=query.message)
         return
 
@@ -1741,7 +1741,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         view = _peer_info_view(client_id, admin=users_db.is_admin(user), back_target=back_target)
         if view is None:
             await query.edit_message_text(
-                "Peer not found.",
+                "Device not found.",
                 reply_markup=InlineKeyboardMarkup([_back_close_row(back_target or ("menu:users" if users_db.is_admin(user) else "menu:list"))]),
             )
             return
@@ -1758,7 +1758,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c = wg.get_client(client_id)
         except Exception:
             await query.edit_message_text(
-                "Peer not found.",
+                "Device not found.",
                 reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
             )
             return
@@ -1773,14 +1773,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if owner is None:
             await query.edit_message_text(
-                "✅ Peer updated.",
+                "✅ Device updated.",
                 reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
             )
             return
         view = _peer_info_view(client_id)
         if view is None:
             await query.edit_message_text(
-                "Peer not found.",
+                "Device not found.",
                 reply_markup=InlineKeyboardMarkup([_back_close_row("menu:users")]),
             )
             return
@@ -1908,7 +1908,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("User not found.")
             return
         await query.edit_message_text(
-            f"⚠️ Delete user <b>{html.escape(username)}</b> and all their peers?\nThis cannot be undone.",
+            f"⚠️ Delete user <b>{html.escape(username)}</b> and all their devices?\nThis cannot be undone.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ Confirm", callback_data=f"udelconfirm:{username}")],
@@ -1997,7 +1997,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif action == "create":
             if users_db.is_admin(user):
-                await query.edit_message_text("Create peer:", reply_markup=CREATE_MENU)
+                await query.edit_message_text("Create device:", reply_markup=CREATE_MENU)
             else:
                 await _create_peer_for(update, user.username, None, message=query.message)
             return
@@ -2069,7 +2069,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         q = context.user_data.get(f"{act}_filter", "")
         filtered = filter_clients(clients, q)
         if not filtered:
-            await query.edit_message_text("No peers found.")
+            await query.edit_message_text("No devices found.")
             return
         title = PEER_SELECT_TITLE[act]
         if q:
@@ -2128,7 +2128,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Access denied.")
             return
         await query.edit_message_text(
-            f"Delete peer <b>{html.escape(name)}</b>?",
+            f"Delete device <b>{html.escape(name)}</b>?",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("✅ Yes, delete", callback_data=f"delconfirm:{client_id}"),
                 InlineKeyboardButton("❌ Cancel", callback_data="cancel"),
@@ -2153,11 +2153,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             users_db.remove_peer(str(client.get("name", "")).lower())
             if owner and users_db.is_admin(user):
                 await query.edit_message_text(
-                    "✅ Peer deleted.",
+                    "✅ Device deleted.",
                     reply_markup=InlineKeyboardMarkup([_back_close_row(f"upeers:{owner}")]),
                 )
             else:
-                await query.edit_message_text("✅ Peer deleted.")
+                await query.edit_message_text("✅ Device deleted.")
         except Exception as e:
             await query.edit_message_text(f"API error: {e}")
         return

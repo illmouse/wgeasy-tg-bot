@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.7] - 2026-11-08
+
+Stable release. Rolls up the `1.1.0b`–`1.1.7b` beta line since `1.0.1`.
+
+### Added
+
+- Device lists now provide paginated All, Active, Enabled, and Disabled filters, cumulative traffic totals, and device details with status, activity, creation date, and handshake information. Admins can see device owners.
+- Admin user management includes paginated and filtered user lists, user details and request history, account enable/disable, and admin promotion/demotion with protection for the last admin.
+- Admin request history includes a paginated table, All and Pending views, direct approval and decline actions, and the admin who handled each request.
+- Access and limit request notifications reach admins who have started the bot and are updated when requests are decided; users receive approval or decline notifications.
+
+### Changed
+
+- Reworked user and admin menus around Devices, with device download, rename, status, and delete actions in device details. Admins can create devices for themselves or another registered user and choose a custom name.
+- Automatically generated device names use an 8-character client-ID hash without a prefix. Device-name prompts explain the 1–15 character limit and accepted characters.
+- Limit requests display the requested limit without an unavailable previous value. The device list shows users their current device usage and limit.
+- Admin user lists show admins first and provide All, Enabled, and Disabled filters. User enable/disable actions also enable or disable that user's devices.
+- README terminology now consistently uses “device” and includes the obfuscated user and admin screenshots.
+- Repeated filter selections no longer surface Telegram's “Message is not modified” error; device details show creation year and activity status.
+
 ## [1.1.7b] - 2026-11-08
 
 ### Changed
