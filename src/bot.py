@@ -287,7 +287,7 @@ def format_peers_text(clients: list) -> str:
     return "\n".join(lines)
 
 
-def _dt_short(value, with_time=False):
+def _dt_short(value, with_time=False, with_year=False):
     if not value:
         return "—"
     try:
@@ -299,7 +299,21 @@ def _dt_short(value, with_time=False):
             return "—"
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
+    if with_year:
+        return dt.strftime("%d.%m.%Y %H:%M" if with_time else "%d.%m.%Y")
     return dt.strftime("%d.%m %H:%M" if with_time else "%d.%m")
+
+
+def _is_message_not_modified_error(error):
+    return "message is not modified" in str(error).lower()
+
+
+async def _edit_callback_message_if_changed(query, *args, **kwargs):
+    try:
+        await query.edit_message_text(*args, **kwargs)
+    except Exception as exc:
+        if not _is_message_not_modified_error(exc):
+            raise
 
 
 def _compact_bytes(value):
@@ -506,6 +520,8 @@ async def _show_request_history(bot, chat_id, page=0, status_filter="all", messa
             })
         return
     except Exception as exc:
+        if _is_message_not_modified_error(exc):
+            return
         logger.info("Rich request history unavailable; using text view: %s", exc)
 
     if status_filter == "all":
@@ -514,7 +530,11 @@ async def _show_request_history(bot, chat_id, page=0, status_filter="all", messa
     if message_id is None:
         await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
     else:
-        await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, parse_mode="HTML", reply_markup=markup)
+        try:
+            await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, parse_mode="HTML", reply_markup=markup)
+        except Exception as exc:
+            if not _is_message_not_modified_error(exc):
+                raise
 
 
 async def _edit_request_copies(context, req, text):
@@ -739,7 +759,7 @@ def _peers_list_view(username):
         c = by_name[rec["name"]]
         hs = c.get("latestHandshakeAt")
         details = (
-            f"{_dt_short(rec['created_at'])} · ↑{_compact_bytes(c.get('transferRx'))} "
+            f"{_dt_short(rec['created_at'], with_year=True)} · ↑{_compact_bytes(c.get('transferRx'))} "
             f"↓{_compact_bytes(c.get('transferTx'))} · {_handshake_ago(c)} "
             f"({_dt_short(hs, with_time=True) if hs else 'never'})"
         )
@@ -770,7 +790,7 @@ def _peer_info_view(client_id, admin=True, back_target=None):
     owner = rec["owner"] if rec else None
     status = "🟢 Enabled" if c.get("enabled") else "🔴 Disabled"
     ip = c.get("ipv4Address") or "N/A"
-    created = _dt_short(rec["created_at"], with_time=True) if rec else "—"
+    created = _dt_short(rec["created_at"], with_time=True, with_year=True) if rec else "—"
     hs = c.get("latestHandshakeAt")
     parsed_hs = None
     if hs:
@@ -783,7 +803,7 @@ def _peer_info_view(client_id, admin=True, back_target=None):
     if owner:
         lines.append(f"<b>Owner:</b> @{html.escape(owner)}")
     lines.append(f"<b>Status:</b> {status}")
-    activity = "Active" if snapshot is not None and snapshot["is_active"] else "Inactive"
+    activity = "🟢 Active" if snapshot is not None and snapshot["is_active"] else "🔴 Inactive"
     lines.append(f"<b>Activity:</b> {activity}")
     lines.append(f"<b>IP:</b> {html.escape(str(ip))}")
     lines.append(f"<b>Created:</b> {created}")
@@ -1827,7 +1847,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("No registered users.")
             return
         text, kb = view
-        await query.edit_message_text(text, reply_markup=kb)
+        await _edit_callback_message_if_changed(query, text, reply_markup=kb)
         return
 
     if data.startswith("userspage:"):
@@ -1849,7 +1869,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("No registered users.")
             return
         text, kb = view
-        await query.edit_message_text(text, reply_markup=kb)
+        await _edit_callback_message_if_changed(query, text, reply_markup=kb)
         return
 
     if data.startswith("user:"):
@@ -2029,7 +2049,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=markup,
             )
         except Exception as e:
-            await query.edit_message_text(f"API error: {e}")
+            if not _is_message_not_modified_error(e):
+                await query.edit_message_text(f"API error: {e}")
         return
 
     # ── Pagination ──

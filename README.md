@@ -72,7 +72,7 @@ The bot stores users in a SQLite database. Mount a volume to persist `users.db` 
 
 The main menu opens **Devices**. Browse the paginated list using the **All**, **Active**, **Enabled**, and **Disabled** filters. **Active** means the device's received (upload) counter increased since its previous sample; snapshots update at startup and once per minute. The list and device details show cumulative upload and download totals. Your current device usage and limit are shown in the list.
 
-Open a device for its details and configuration download. The detail card shows whether it is enabled and active, along with handshake and traffic totals. Users can rename or remove their own devices from the device details; admins can rename any device and also manage device status and removal.
+Open a device for its details and configuration download. The detail card shows whether it is **Enabled** or **Disabled**, whether it is **Active** or **Inactive**, and includes the creation date with year, handshake and traffic totals. Users can rename or remove their own devices from the device details; admins can rename any device and also manage device status and removal.
 
 Users create devices for themselves. Admins can create devices for themselves or another registered user, and may choose a custom name. Automatically generated names use an 8-character hash without a prefix. Device names can contain 1–15 letters, numbers, underscores, or hyphens. The bot sends the configuration file after creation.
 

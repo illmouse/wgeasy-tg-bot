@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.7b] - 2026-11-08
+
+### Changed
+
+- Device detail cards show the creation year and a status-style emoji for activity.
+- Repeated selections of device, user, or request filters no longer surface Telegram's “Message is not modified” error.
+
+## [1.1.6b] - 2026-11-08
+
+### Added
+
+- Device details show Enabled/Disabled and Active/Inactive states, using the same handshake and traffic snapshot values as the device list.
+- Admins are labeled and shown before regular users in the registered-user list.
+
+### Changed
+
+- Field labels are bolded in device and user detail cards.
+
 ## [1.1.5b] - 2026-11-08
 
 ### Added

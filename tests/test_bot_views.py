@@ -156,6 +156,11 @@ class CachedListViewTests(unittest.TestCase):
         self.assertIn("08.11 12:34", peer_button.text)
 
     def test_device_card_uses_snapshot_traffic_handshake_and_activity(self):
+        bot.users_db.conn.execute(
+            "UPDATE peers SET created_at = ? WHERE name = ?",
+            ("2025-04-03 07:25:00", "phone"),
+        )
+        bot.users_db.conn.commit()
         snapshot = {
             "id": "client-1",
             "name": "phone",
@@ -179,7 +184,8 @@ class CachedListViewTests(unittest.TestCase):
 
         self.assertIn("<b>Owner:</b> @alice", inactive_text)
         self.assertIn("<b>Status:</b> 🟢 Enabled", inactive_text)
-        self.assertIn("<b>Activity:</b> Inactive", inactive_text)
+        self.assertIn("<b>Activity:</b> 🔴 Inactive", inactive_text)
+        self.assertIn("<b>Created:</b> 03.04.2025 07:25", inactive_text)
         self.assertIn("<b>Last handshake:</b> 08.11 12:34", inactive_text)
         self.assertIn("<b>Traffic total:</b> ↑ Upload 1.00 KB · ↓ Download 2.00 KB", inactive_text)
 
@@ -187,14 +193,41 @@ class CachedListViewTests(unittest.TestCase):
         bot.users_db.update_peer_snapshots([snapshot])
         with patch.object(bot.wg, "get_client", return_value=api_detail):
             active_text, _ = bot._peer_info_view("client-1", admin=False)
-        self.assertIn("<b>Activity:</b> Active", active_text)
+        self.assertIn("<b>Activity:</b> 🟢 Active", active_text)
         self.assertIn("↑ Upload 1.50 KB", active_text)
 
         api_detail["enabled"] = False
         with patch.object(bot.wg, "get_client", return_value=api_detail):
             disabled_active_text, _ = bot._peer_info_view("client-1", admin=False)
         self.assertIn("<b>Status:</b> 🔴 Disabled", disabled_active_text)
-        self.assertIn("<b>Activity:</b> Active", disabled_active_text)
+        self.assertIn("<b>Activity:</b> 🟢 Active", disabled_active_text)
+
+    def test_repeated_device_filters_ignore_message_not_modified(self):
+        for filter_name in ("all", "active", "enabled", "disabled"):
+            query = _NotModifiedQuery(f"dev:{filter_name}:0")
+            update = SimpleNamespace(
+                effective_user=SimpleNamespace(id=101, username="alice"),
+                callback_query=query,
+            )
+            asyncio.run(bot.on_callback(update, SimpleNamespace(user_data={})))
+            self.assertEqual(query.edit_attempts, 1, filter_name)
+
+    def test_repeated_user_filters_ignore_message_not_modified(self):
+        bot.users_db.add_user("admin", tg_id=303, role="admin", limit=-1)
+        for filter_name in ("all", "enabled", "disabled"):
+            query = _NotModifiedQuery(f"usersview:{filter_name}:0")
+            update = SimpleNamespace(
+                effective_user=SimpleNamespace(id=303, username="admin"),
+                callback_query=query,
+            )
+            asyncio.run(bot.on_callback(update, SimpleNamespace(user_data={})))
+            self.assertEqual(query.edit_attempts, 1, filter_name)
+
+    def test_repeated_request_history_filter_ignores_message_not_modified(self):
+        rich_bot = _NotModifiedRichBot()
+        asyncio.run(bot._show_request_history(rich_bot, 10, message_id=99))
+        self.assertEqual(rich_bot.edit_attempts, 1)
+        self.assertFalse(rich_bot.fallback_called)
 
     def test_command_and_reply_keyboard_cancel_are_silent(self):
         message = _CancellableMessage()
@@ -252,6 +285,32 @@ class _CancellableQuery:
 
     async def answer(self):
         self.answered = True
+
+
+class _NotModifiedQuery:
+    def __init__(self, data):
+        self.data = data
+        self.edit_attempts = 0
+
+    async def answer(self):
+        pass
+
+    async def edit_message_text(self, *args, **kwargs):
+        self.edit_attempts += 1
+        raise RuntimeError("BadRequest: Message is not modified")
+
+
+class _NotModifiedRichBot:
+    def __init__(self):
+        self.edit_attempts = 0
+        self.fallback_called = False
+
+    async def _post(self, method, data):
+        self.edit_attempts += 1
+        raise RuntimeError("BadRequest: Message is not modified")
+
+    async def edit_message_text(self, *args, **kwargs):
+        self.fallback_called = True
 
 
 if __name__ == "__main__":
