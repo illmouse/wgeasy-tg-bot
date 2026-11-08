@@ -70,7 +70,7 @@ The bot stores users in a SQLite database. Mount a volume to persist `users.db` 
 
 ### Devices
 
-The main menu opens **Devices**. Browse the paginated list using the **All**, **Active**, **Enabled**, and **Disabled** filters. **Active** means a handshake within the last 3 minutes. Your current device usage and limit are shown in the list.
+The main menu opens **Devices**. Browse the paginated list using the **All**, **Active**, **Enabled**, and **Disabled** filters. **Active** means the device's received (upload) counter increased since its previous sample; snapshots update at startup and once per minute. The list and device details show cumulative upload and download totals. Your current device usage and limit are shown in the list.
 
 Open a device for its details and configuration download. Users can rename or remove their own devices from the device details; admins can rename any device and also manage device status and removal.
 
@@ -83,13 +83,13 @@ Users create devices for themselves. Admins can create devices for themselves or
 | `/start` | Show reply keyboard (private chat) |
 | `/menu` | Show inline keyboard (works everywhere) |
 | `/create` | Start device creation; admins can use `/create <username>` to create for a registered user |
-| `/cancel` | Cancel current operation |
+| `/cancel` | Cancel the current operation silently and close its prompt |
 | `/adduser` | Add a user — forward a message from them or send their username (admin only) |
 | `/users` | Browse and manage registered users (admin only) |
 | `/limit <username> <N>` | Set a user's peer limit; `-1` means unlimited (admin only) |
 | `/deluser <username>` | Remove a user together with all their peers (admin only) |
-| `/ban <username>` | Temporarily block a user and disable their peers (admin only) |
-| `/unban <username>` | Unblock a user and re-enable their peers (admin only) |
+| `/disable <username>` | Disable a user and their devices (admin only) |
+| `/enable <username>` | Enable a user and their devices (admin only) |
 | `/requests` | Browse all or pending access/limit requests; approve or decline pending requests (admin only) |
 | `/givemepowers` | Request access, or view your devices, limit and request history if registered |
 
@@ -103,7 +103,7 @@ Unregistered users can request access with `/givemepowers`. Admins who have star
 
 #### User and role controls
 
-In `/users`, admins can browse the paginated user list and open a user’s details to review their devices and requests, change their limit, ban or unban them, delete them, or promote/demote their role. The last admin cannot be demoted. `/ban` blocks the user and disables their devices; `/unban` restores access and re-enables them. Deleting a user also deletes their devices from wg-easy.
+In `/users`, admins can filter the registered-user list by **All**, **Enabled**, or **Disabled**, then open a user’s details to review their devices and requests, change their limit, enable or disable them, delete them, or promote/demote their role. The last admin cannot be demoted. `/disable` disables the user account and their devices; `/enable` restores access and re-enables the devices. Deleting a user also deletes their devices from wg-easy.
 
 #### Limits and request history
 

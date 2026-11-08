@@ -8,7 +8,7 @@ class User:
     username: str
     role: str
     config_limit: int
-    status: str = "active"
+    status: str = "enabled"
 
 
 class UserDB:
@@ -61,10 +61,10 @@ class UserDB:
             """
         )
         for statement in (
-            "ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
-            "ALTER TABLE users ADD COLUMN banned_at TEXT",
-            "ALTER TABLE users ADD COLUMN banned_by TEXT",
-            "ALTER TABLE users ADD COLUMN banned_until TEXT",
+            "ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'enabled'",
+            "ALTER TABLE users ADD COLUMN disabled_at TEXT",
+            "ALTER TABLE users ADD COLUMN disabled_by TEXT",
+            "ALTER TABLE users ADD COLUMN disabled_until TEXT",
             "ALTER TABLE requests ADD COLUMN type TEXT NOT NULL DEFAULT 'access'",
             "ALTER TABLE requests ADD COLUMN requested_limit INTEGER",
             "ALTER TABLE requests ADD COLUMN previous_limit INTEGER",
@@ -74,6 +74,32 @@ class UserDB:
                 cur.execute(statement)
             except sqlite3.OperationalError:
                 pass
+        user_columns = {row[1] for row in cur.execute("PRAGMA table_info(users)").fetchall()}
+        for old_name, new_name in (
+            ("banned_at", "disabled_at"),
+            ("banned_by", "disabled_by"),
+            ("banned_until", "disabled_until"),
+        ):
+            if old_name in user_columns:
+                cur.execute(
+                    f"UPDATE users SET {new_name} = COALESCE({new_name}, {old_name})"
+                )
+        cur.execute("UPDATE users SET status = 'disabled' WHERE status = 'banned'")
+        cur.execute("UPDATE users SET status = 'enabled' WHERE status = 'active'")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS peer_snapshots (
+              client_id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              enabled INTEGER NOT NULL,
+              latest_handshake_at TEXT,
+              transfer_rx INTEGER NOT NULL DEFAULT 0,
+              transfer_tx INTEGER NOT NULL DEFAULT 0,
+              is_active INTEGER NOT NULL DEFAULT 0,
+              sampled_at TEXT NOT NULL
+            )
+            """
+        )
         self.conn.commit()
 
     def set_bootstrap_sets(self, admins: set[str], users: set[str]) -> None:
@@ -94,7 +120,7 @@ class UserDB:
             username=row["username"],
             role=row["role"],
             config_limit=row["config_limit"],
-            status=row["status"] if "status" in row.keys() else "active",
+            status=row["status"] if "status" in row.keys() else "enabled",
         )
 
     def resolve(self, tg_id: int | None, username: str | None) -> User | None:
@@ -122,7 +148,8 @@ class UserDB:
                     return self._row_to_user(row)
             if uname in self._admins:
                 cur.execute(
-                    "INSERT INTO users (username, tg_id, role, config_limit) VALUES (?, ?, 'admin', -1)",
+                    "INSERT INTO users (username, tg_id, role, config_limit, status) "
+                    "VALUES (?, ?, 'admin', -1, 'enabled')",
                     (uname, tg_id),
                 )
                 self.conn.commit()
@@ -132,7 +159,8 @@ class UserDB:
                     return self._row_to_user(row)
             if uname in self._users:
                 cur.execute(
-                    "INSERT INTO users (username, tg_id, role, config_limit) VALUES (?, ?, 'user', ?)",
+                    "INSERT INTO users (username, tg_id, role, config_limit, status) "
+                    "VALUES (?, ?, 'user', ?, 'enabled')",
                     (uname, tg_id, self.default_limit),
                 )
                 self.conn.commit()
@@ -162,7 +190,7 @@ class UserDB:
             if cur.fetchone():
                 raise ValueError("user already exists")
         cur.execute(
-            "INSERT INTO users (username, tg_id, role, config_limit) VALUES (?, ?, ?, ?)",
+            "INSERT INTO users (username, tg_id, role, config_limit, status) VALUES (?, ?, ?, ?, 'enabled')",
             (uname, tg_id, role, limit),
         )
         self.conn.commit()
@@ -194,9 +222,14 @@ class UserDB:
         self.conn.commit()
         return cur.rowcount > 0
 
-    def list_users(self) -> list[User]:
+    def list_users(self, status: str | None = None) -> list[User]:
+        if status not in (None, "enabled", "disabled"):
+            raise ValueError("invalid user status")
         cur = self.conn.cursor()
-        cur.execute("SELECT * FROM users ORDER BY username")
+        if status is None:
+            cur.execute("SELECT * FROM users ORDER BY username")
+        else:
+            cur.execute("SELECT * FROM users WHERE status = ? ORDER BY username", (status,))
         rows = cur.fetchall()
         return [self._row_to_user(r) for r in rows]
 
@@ -335,25 +368,25 @@ class UserDB:
             return None
         return self._row_to_user(row)
 
-    def ban_user(self, username: str, banned_by: str | None = None) -> User:
+    def disable_user(self, username: str, disabled_by: str | None = None) -> User:
         uname = str(username).strip().lstrip("@").lower()
         cur = self.conn.cursor()
         cur.execute(
-            "UPDATE users SET status = 'banned', banned_at = datetime('now'), "
-            "banned_by = ? WHERE username = ?",
-            (banned_by, uname),
+            "UPDATE users SET status = 'disabled', disabled_at = datetime('now'), "
+            "disabled_by = ? WHERE username = ?",
+            (disabled_by, uname),
         )
         self.conn.commit()
         if cur.rowcount == 0:
             raise KeyError(username)
         return self.get_user(uname)
 
-    def unban_user(self, username: str) -> User:
+    def enable_user(self, username: str) -> User:
         uname = str(username).strip().lstrip("@").lower()
         cur = self.conn.cursor()
         cur.execute(
-            "UPDATE users SET status = 'active', banned_at = NULL, banned_by = NULL, "
-            "banned_until = NULL WHERE username = ?",
+            "UPDATE users SET status = 'enabled', disabled_at = NULL, disabled_by = NULL, "
+            "disabled_until = NULL WHERE username = ?",
             (uname,),
         )
         self.conn.commit()
@@ -396,8 +429,77 @@ class UserDB:
             raise ValueError("invalid request status")
         return self.conn.execute("SELECT COUNT(*) FROM requests WHERE status = ?", (status,)).fetchone()[0]
 
-    def is_banned(self, user: User) -> bool:
-        return user.status == "banned"
+    def is_disabled(self, user: User) -> bool:
+        return user.status == "disabled"
+
+    @staticmethod
+    def _counter(value) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def update_peer_snapshots(self, clients: list[dict]) -> None:
+        """Persist one successful wg-easy sample and detect RX activity deltas."""
+        cur = self.conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        try:
+            previous = {
+                row["client_id"]: row["transfer_rx"]
+                for row in cur.execute("SELECT client_id, transfer_rx FROM peer_snapshots")
+            }
+            sampled_at = cur.execute("SELECT datetime('now')").fetchone()[0]
+            snapshots = []
+            for client in clients:
+                client_id = client.get("id")
+                if client_id is None:
+                    client_id = client.get("clientId")
+                if client_id is None:
+                    continue
+                client_id = str(client_id)
+                transfer_rx = self._counter(client.get("transferRx"))
+                transfer_tx = self._counter(client.get("transferTx"))
+                old_rx = previous.get(client_id)
+                is_active = old_rx is not None and transfer_rx > old_rx
+                snapshots.append((
+                    client_id,
+                    str(client.get("name") or ""),
+                    int(bool(client.get("enabled"))),
+                    client.get("latestHandshakeAt"),
+                    transfer_rx,
+                    transfer_tx,
+                    int(is_active),
+                    sampled_at,
+                ))
+            cur.execute("DELETE FROM peer_snapshots")
+            cur.executemany(
+                "INSERT INTO peer_snapshots "
+                "(client_id, name, enabled, latest_handshake_at, transfer_rx, transfer_tx, is_active, sampled_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                snapshots,
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def list_peer_snapshots(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT client_id, name, enabled, latest_handshake_at, transfer_rx, transfer_tx, is_active "
+            "FROM peer_snapshots ORDER BY name"
+        ).fetchall()
+        return [
+            {
+                "id": row["client_id"],
+                "name": row["name"],
+                "enabled": bool(row["enabled"]),
+                "latestHandshakeAt": row["latest_handshake_at"],
+                "transferRx": row["transfer_rx"],
+                "transferTx": row["transfer_tx"],
+                "is_active": bool(row["is_active"]),
+            }
+            for row in rows
+        ]
 
     def _norm_owner(self, owner: str) -> str:
         return str(owner).strip().lstrip("@").lower()

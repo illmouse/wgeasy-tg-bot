@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.5b] - 2026-11-08
+
+### Added
+
+- Peer snapshots are sampled from wg-easy at startup and once per minute, stored in SQLite, and used by device and admin user lists without a live API read when opening those lists.
+- Device lists and details show cumulative upload and download totals. The Active filter now reflects whether a peer's received-byte counter increased since the previous successful sample.
+- The registered-user list has All, Enabled, and Disabled filters. User controls and commands now use Enable/Disable terminology (`/enable` and `/disable`).
+
+### Changed
+
+- Inline Cancel and Close actions remove their bot message; `/cancel` and the reply-keyboard Cancel action are silent and delete the cancellation message where Telegram permits.
+
 ## [1.1.4b] - 2026-11-07
 
 ### Added

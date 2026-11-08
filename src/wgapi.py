@@ -1,4 +1,5 @@
 import os
+import threading
 import requests
 
 # wg-easy v15+ authenticates via /api/auth/password; older versions
@@ -14,6 +15,7 @@ class WGEasyAPI:
         self.session = requests.Session()
         self._authenticated = False
         self._auth_path = None
+        self._request_lock = threading.RLock()
 
     def login(self):
         candidates = [self._auth_path] if self._auth_path else []
@@ -42,6 +44,10 @@ class WGEasyAPI:
         self._authenticated = True
 
     def _request(self, method, path, **kwargs):
+        with self._request_lock:
+            return self._request_locked(method, path, **kwargs)
+
+    def _request_locked(self, method, path, **kwargs):
         if not self._authenticated:
             self.login()
         url = f"{self.base_url}{path}"
