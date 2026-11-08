@@ -29,16 +29,6 @@ def dt_short(value, with_time=False, with_year=False):
     return dt.strftime("%d.%m %H:%M" if with_time else "%d.%m")
 
 
-def compact_bytes(value):
-    formatted = format_bytes(value)
-    amount, _, unit = formatted.partition(" ")
-    if amount.endswith(".00"):
-        amount = amount[:-3]
-    elif amount.endswith("0") and "." in amount:
-        amount = amount[:-1]
-    return f"{amount}{unit}"
-
-
 def handshake_ago(client):
     hs = client.get("latestHandshakeAt")
     if not hs:
@@ -160,12 +150,7 @@ def peers_list_view(db: UserDB, username):
     rows = []
     for rec in active:
         c = by_name[rec["name"]]
-        hs = c.get("latestHandshakeAt")
-        details = (
-            f"{dt_short(rec['created_at'], with_year=True)} · ↑{compact_bytes(c.get('transferRx'))} "
-            f"↓{compact_bytes(c.get('transferTx'))} · {handshake_ago(c)} "
-            f"({dt_short(hs, with_time=True) if hs else 'never'})"
-        )
+        details = f"{dt_short(rec['created_at'], with_year=True)} · {handshake_ago(c)}"
         name_budget = max(1, 64 - len(details) - 3)
         name = rec["name"]
         short_name = name if len(name) <= name_budget else f"{name[:name_budget - 1]}…"

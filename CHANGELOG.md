@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.9b] - 2026-11-08
+
+### Changed
+
+- Device list buttons now show only relative handshake age alongside the device name (and owner for admins). Per-user device lists retain the creation date but omit upload/download totals and the absolute last-handshake timestamp. Full traffic and handshake details remain on device detail cards.
+
 ## [1.1.8b] - 2026-11-08
 
 ### Added

@@ -122,7 +122,7 @@ class CachedListViewTests(unittest.TestCase):
         self.assertIn("zadmin (admin)", user_buttons[0].text)
         self.assertEqual(user_buttons[0].callback_data, "user:zadmin:all:0")
 
-    def test_device_view_uses_snapshot_and_renders_traffic_totals(self):
+    def test_device_lists_show_relative_handshake_without_traffic_or_absolute_handshake(self):
         bot.users_db.add_user("admin", tg_id=303, role="admin", limit=3)
         user = bot.users_db.get_user("admin")
         bot.users_db.update_peer_snapshots([
@@ -144,17 +144,19 @@ class CachedListViewTests(unittest.TestCase):
         self.assertEqual(len(clients), 1)
         device_button = next(button for button in self.buttons(markup) if button.callback_data.startswith("pinfo:"))
         self.assertLessEqual(len(device_button.text), 64)
-        self.assertIn("↑1KB", device_button.text)
-        self.assertIn("↓2KB", device_button.text)
-        self.assertIn("08.11 12:34", device_button.text)
+        self.assertIn(bot._handshake_ago(clients[0]), device_button.text)
+        self.assertNotIn("↑", device_button.text)
+        self.assertNotIn("↓", device_button.text)
+        self.assertNotIn("08.11 12:34", device_button.text)
         self.assertIn("@alice", device_button.text)
 
         _, peers_markup = bot._peers_list_view("alice")
         peer_button = next(button for button in self.buttons(peers_markup) if button.callback_data.startswith("pinfo:"))
         self.assertLessEqual(len(peer_button.text), 64)
-        self.assertIn("↑1KB", peer_button.text)
-        self.assertIn("↓2KB", peer_button.text)
-        self.assertIn("08.11 12:34", peer_button.text)
+        self.assertIn(bot._handshake_ago(clients[0]), peer_button.text)
+        self.assertNotIn("↑", peer_button.text)
+        self.assertNotIn("↓", peer_button.text)
+        self.assertNotIn("08.11 12:34", peer_button.text)
 
     def test_device_card_uses_snapshot_traffic_handshake_and_activity(self):
         bot.users_db.conn.execute(

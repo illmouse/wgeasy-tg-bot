@@ -39,8 +39,6 @@ from device_operations import (
 from bot_views import (
     PAGE_SIZE,
     back_close_row as _back_close_row,
-    compact_bytes as _compact_bytes,
-    dt_short as _dt_short,
     filtered_request_history_view,
     format_request_line as _format_request_line,
     handshake_ago as _handshake_ago,
@@ -630,11 +628,7 @@ def _device_list_markup(clients, user, filter_name="all", page=0):
     for c in clients[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]:
         name = str(c.get("name", "?"))
         owner = users_db.peer_owner(name.lower())
-        hs = c.get("latestHandshakeAt")
-        when = _dt_short(hs, with_time=True) if hs else "never"
-        upload = _compact_bytes(c.get("transferRx"))
-        download = _compact_bytes(c.get("transferTx"))
-        details = f"↑{upload} ↓{download} · {_handshake_ago(c)} ({when})"
+        details = _handshake_ago(c)
         owner_label = f" · @{owner[:8]}" if users_db.is_admin(user) and owner else ""
         name_budget = max(1, 64 - len(details) - len(owner_label) - 1)
         short_name = name if len(name) <= name_budget else f"{name[:name_budget - 1]}…"

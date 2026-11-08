@@ -80,7 +80,7 @@ upgrading; restore the previous image tag and database backup to roll back.
 
 ### Devices
 
-The main menu opens **Devices**. Browse the paginated list using the **All**, **Active**, **Enabled**, and **Disabled** filters. **Active** means the device's received (upload) counter increased since its previous sample; snapshots update at startup and once per minute. The list and device details show cumulative upload and download totals. Your current device usage and limit are shown in the list.
+The main menu opens **Devices**. Browse the paginated list using the **All**, **Active**, **Enabled**, and **Disabled** filters. **Active** means the device's received (upload) counter increased since its previous sample; snapshots update at startup and once per minute. Device buttons show the relative time since the last handshake; per-user device lists also show the creation date. Your current device usage and limit are shown in the list.
 
 Open a device for its details and configuration download. Configuration files are delivered only to the requesting user's private chat with the bot; start the bot privately before requesting a configuration from a group. The detail card shows whether it is **Enabled** or **Disabled**, whether it is **Active** or **Inactive**, and includes the creation date with year, handshake and traffic totals. Users can rename or remove their own devices from the device details; admins can rename any device and also manage device status and removal.
 
